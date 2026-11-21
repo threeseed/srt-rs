@@ -4,12 +4,12 @@ use std::{
 };
 
 use bytes::Bytes;
+use compio::time::sleep;
 use futures::{stream, SinkExt, StreamExt};
-use tokio::time::sleep;
 
-use srt_tokio::SrtListener;
+use srt_compio::SrtListener;
 
-#[tokio::main]
+#[compio::main]
 async fn main() -> Result<(), Error> {
     let port = 3333;
     let (_binding, mut incoming) = SrtListener::builder().bind(port).await?;
@@ -18,7 +18,7 @@ async fn main() -> Result<(), Error> {
 
     while let Some(request) = incoming.incoming().next().await {
         let mut srt_socket = request.accept(None).await.unwrap();
-        tokio::spawn(async move {
+        compio::runtime::spawn(async move {
             let client_desc = format!(
                 "(ip_port: {}, sockid: {})",
                 srt_socket.settings().remote,
@@ -40,13 +40,14 @@ async fn main() -> Result<(), Error> {
                     ))
                 },
             )
-            .boxed();
+            .boxed_local();
 
             if let Err(e) = srt_socket.send_all(&mut stream).await {
                 println!("\nSend to client: {client_desc} error: {e:?}");
             }
             println!("\nClient {client_desc} disconnected");
-        });
+        })
+        .detach();
     }
     Ok(())
 }

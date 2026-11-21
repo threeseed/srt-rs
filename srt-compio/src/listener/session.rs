@@ -1,5 +1,6 @@
 use std::{io::ErrorKind, net::SocketAddr};
 
+use compio::runtime::JoinHandle;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -11,7 +12,6 @@ use srt_protocol::{
     packet::*,
     settings::*,
 };
-use compio::runtime::JoinHandle;
 
 use crate::{
     net::PacketSocket,

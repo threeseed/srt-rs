@@ -5,7 +5,7 @@
 // ffplay http://localhost:8000/segments/dash.mpd
 
 #[cfg(feature = "ac-ffmpeg")]
-#[tokio::main]
+#[compio::main]
 async fn main() -> anyhow::Result<()> {
     use ac_ffmpeg::{
         codec::{CodecParameters, VideoCodecParametersBuilder},
@@ -18,15 +18,14 @@ async fn main() -> anyhow::Result<()> {
     };
     use anyhow::{Context, Result};
     use bytes::Bytes;
-    use futures::Stream;
-    use srt_tokio::SrtListener;
+    use futures::{Stream, StreamExt, TryStreamExt};
+    use srt_compio::SrtListener;
     use std::{
         fs::{self, File},
         io::{self, Read},
         sync::mpsc::{channel, Receiver, Sender},
         time::Instant,
     };
-    use tokio_stream::StreamExt;
 
     fn open_output(
         path: &str,
@@ -180,10 +179,10 @@ async fn main() -> anyhow::Result<()> {
 
     while let Some(request) = incoming.incoming().next().await {
         let socket = request.accept(None).await?;
-        tokio::spawn(async move {
+        compio::runtime::spawn(async move {
             let socket_id = socket.settings().remote_sockid.0;
             let (tx, rx) = channel();
-            let f1 = tokio::task::spawn_blocking(move || handle_input(ByteReceiver::new(rx)));
+            let f1 = compio::runtime::spawn_blocking(move || handle_input(ByteReceiver::new(rx)));
             let f2 = async {
                 let client_desc = format!(
                     "(ip_port: {}, sockid: {}, stream_id: {:?})",
@@ -196,15 +195,18 @@ async fn main() -> anyhow::Result<()> {
                 println!("Client {client_desc} disconnected, received {count:?} packets");
                 Ok::<_, anyhow::Error>(())
             };
-            let (r1, r2) = tokio::join!(f1, f2);
+            let (r1, r2) = futures::join!(f1, f2);
 
-            if let Err(e) = r1 {
-                println!("Error in input handler: {e}");
+            match r1 {
+                Err(e) => println!("Input handler panicked: {e:?}"),
+                Ok(Err(e)) => println!("Error in input handler: {e}"),
+                Ok(Ok(_)) => {}
             }
             if let Err(e) = r2 {
                 println!("Error in socket handler: {e}");
             }
-        });
+        })
+        .detach();
     }
 
     println!("\nServer closed");

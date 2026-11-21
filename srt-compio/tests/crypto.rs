@@ -3,13 +3,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use srt_tokio::SrtSocket;
+use srt_compio::SrtSocket;
 
 use assert_matches::assert_matches;
 use bytes::Bytes;
+use compio::{runtime::spawn, time::sleep};
+use futures::FutureExt;
 use futures::{SinkExt, TryStreamExt};
 use log::info;
-use tokio::{select, spawn, time::sleep};
 
 async fn test_crypto(size: u16) {
     let sender = SrtSocket::builder()
@@ -41,7 +42,7 @@ async fn test_crypto(size: u16) {
     t.await.unwrap();
 }
 
-#[tokio::test]
+#[compio::test]
 async fn crypto_exchange() {
     let _ = pretty_env_logger::try_init();
 
@@ -52,7 +53,7 @@ async fn crypto_exchange() {
     test_crypto(32).await;
 }
 
-#[tokio::test]
+#[compio::test]
 async fn bad_password_listen() {
     let listener = SrtSocket::builder()
         .encryption(16, "password1234")
@@ -70,12 +71,12 @@ async fn bad_password_listen() {
     assert_matches!(res, Err(e) if e.kind() == io::ErrorKind::ConnectionRefused);
 
     assert_matches!(
-        tokio::time::timeout(Duration::from_millis(100), listener_fut).await,
+        compio::time::timeout(Duration::from_millis(100), listener_fut).await,
         Err(_)
     );
 }
 
-#[tokio::test]
+#[compio::test]
 async fn bad_password_rendezvous() {
     let a = SrtSocket::builder()
         .local_port(5301)
@@ -87,9 +88,9 @@ async fn bad_password_rendezvous() {
         .local_port(5300)
         .rendezvous("127.0.0.1:5301");
 
-    let result = select!(
-        r = a => r,
-        r = b => r
+    let result = futures::select!(
+        r = a.fuse() => r,
+        r = b.fuse() => r
     );
 
     assert_matches!(result, Err(e) if e.kind() == io::ErrorKind::ConnectionRefused);

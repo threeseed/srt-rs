@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures::{stream, SinkExt, StreamExt};
 use log::info;
 
-use srt_tokio::{access::*, options::*, SrtListener};
+use srt_compio::{access::*, options::*, SrtListener};
 
 fn access_control(stream_id: Option<&StreamId>, ip: SocketAddr) -> Result<(), RejectReason> {
     info!("Got request from {} for {:?}", ip, stream_id);
@@ -31,7 +31,7 @@ fn access_control(stream_id: Option<&StreamId>, ip: SocketAddr) -> Result<(), Re
     Err(RejectReason::Server(ServerRejectReason::Forbidden))
 }
 
-#[tokio::main]
+#[compio::main]
 async fn main() -> io::Result<()> {
     let _ = pretty_env_logger::try_init();
 
@@ -50,11 +50,12 @@ async fn main() -> io::Result<()> {
                     .into_iter(),
                 );
 
-                tokio::spawn(async move {
+                compio::runtime::spawn(async move {
                     sender.send_all(&mut stream).await.unwrap();
                     sender.close().await.unwrap();
                     info!("Sender finished");
-                });
+                })
+                .detach();
             }
             Err(reason) => {
                 request.reject(reason).await.unwrap();

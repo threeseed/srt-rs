@@ -1,22 +1,22 @@
 use bytes::Bytes;
 use futures::{stream, SinkExt, StreamExt};
 use log::info;
+use srt_compio::{ConnectionRequest, SrtListener};
 use srt_protocol::access::RejectReason;
 use srt_protocol::options::KeySize;
 use srt_protocol::packet::ServerRejectReason;
 use srt_protocol::settings::{KeySettings, Passphrase};
-use srt_tokio::{ConnectionRequest, SrtListener};
 use std::io;
 use std::time::Instant;
 
-#[tokio::main]
+#[compio::main]
 async fn main() -> io::Result<()> {
     let _ = pretty_env_logger::try_init();
 
     let (_server, mut incoming) = SrtListener::builder().bind(3333).await.unwrap();
 
     while let Some(request) = incoming.incoming().next().await {
-        tokio::spawn(async move { handle_request(request).await });
+        compio::runtime::spawn(async move { handle_request(request).await }).detach();
     }
 
     Ok(())

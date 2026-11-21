@@ -3,9 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use compio::time::interval;
 use futures::{prelude::*, select};
 use log::{debug, info, trace, warn};
-use compio::time::interval;
 
 use srt_protocol::{
     connection::Connection,

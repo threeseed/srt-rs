@@ -15,19 +15,19 @@ use std::{
 
 use anyhow::Error;
 use bytes::Bytes;
+use compio::{
+    buf::BufResult,
+    net::UdpSocket,
+    runtime::spawn_blocking,
+    time::{self, sleep},
+};
 use futures::{future::try_join, join, stream, SinkExt, Stream, StreamExt};
 use libc::sockaddr;
 use libloading::{Library, Symbol};
 use log::{debug, info};
 use srt_protocol::options::PacketCount;
-use tokio::{
-    net::UdpSocket,
-    task::spawn_blocking,
-    time::{self, sleep},
-};
-use tokio_util::{codec::BytesCodec, udp::UdpFramed};
 
-use srt_tokio::SrtSocket;
+use srt_compio::SrtSocket;
 
 macro_rules! allow_not_found {
     ($x:expr) => {
@@ -47,26 +47,30 @@ macro_rules! allow_not_found {
 }
 
 fn counting_stream(packets: u32, delay: Duration) -> impl Stream<Item = Bytes> {
-    tokio_stream::StreamExt::throttle(
-        stream::iter(0..packets).map(|i| Bytes::from(i.to_string())),
-        delay,
-    )
-    .boxed()
+    stream::iter(0..packets)
+        .then(move |i| async move {
+            sleep(delay).await;
+            Bytes::from(i.to_string())
+        })
+        .boxed_local()
 }
 
 async fn udp_recvr(packets: u32, port: u16) -> Result<(), Error> {
     // start udp listener
-    let socket = UdpFramed::new(
-        UdpSocket::bind(&SocketAddr::V4(SocketAddrV4::new(
-            "127.0.0.1".parse().unwrap(),
-            port,
-        )))
-        .await
-        .unwrap(),
-        BytesCodec::new(),
-    );
+    let socket = UdpSocket::bind(SocketAddr::V4(SocketAddrV4::new(
+        "127.0.0.1".parse().unwrap(),
+        port,
+    )))
+    .await
+    .unwrap();
 
-    receiver(packets, socket.map(|i| i.unwrap().0.freeze())).await
+    let stream = stream::unfold(socket, |socket| async move {
+        let BufResult(res, buf) = socket.recv_from(Vec::with_capacity(65536)).await;
+        res.unwrap();
+        Some((Bytes::from(buf), socket))
+    });
+
+    receiver(packets, Box::pin(stream)).await
 }
 
 async fn receiver(
@@ -96,8 +100,9 @@ async fn receiver(
 async fn udp_sender(packets: u32, port: u16) -> Result<(), Error> {
     let sock = UdpSocket::bind("127.0.0.1:0").await?;
     for i in 0..packets {
-        sock.send_to(i.to_string().as_bytes(), ("127.0.0.1", port))
-            .await?;
+        sock.send_to(i.to_string().into_bytes(), ("127.0.0.1", port))
+            .await
+            .0?;
 
         sleep(Duration::from_millis(1)).await;
     }
@@ -105,7 +110,7 @@ async fn udp_sender(packets: u32, port: u16) -> Result<(), Error> {
     Ok(())
 }
 
-#[tokio::test]
+#[compio::test]
 async fn stransmit_client() -> Result<(), Error> {
     let _ = pretty_env_logger::try_init();
 
@@ -157,7 +162,7 @@ async fn stransmit_client() -> Result<(), Error> {
     listener.await;
     stransmit.wait()?;
 
-    if time::Instant::now().elapsed() > Duration::MAX {
+    if Instant::now().elapsed() > Duration::MAX {
         haivision_echo(
             1,
             0,
@@ -174,7 +179,7 @@ async fn stransmit_client() -> Result<(), Error> {
 }
 
 // srt-rs connects to stransmit and sends to stransmit
-#[tokio::test]
+#[compio::test]
 async fn stransmit_server() -> Result<(), Error> {
     let _ = pretty_env_logger::try_init();
 
@@ -219,7 +224,7 @@ async fn stransmit_server() -> Result<(), Error> {
     Ok(())
 }
 
-#[tokio::test]
+#[compio::test]
 #[ignore]
 async fn stransmit_rendezvous() -> Result<(), Error> {
     let _ = pretty_env_logger::try_init();
@@ -259,7 +264,7 @@ async fn stransmit_rendezvous() -> Result<(), Error> {
     Ok(())
 }
 
-#[tokio::test]
+#[compio::test]
 async fn stransmit_encrypt() -> Result<(), Error> {
     let _ = pretty_env_logger::try_init();
 
@@ -293,7 +298,7 @@ async fn stransmit_encrypt() -> Result<(), Error> {
     Ok(())
 }
 
-#[tokio::test]
+#[compio::test]
 async fn stransmit_decrypt() -> Result<(), Error> {
     let _ = pretty_env_logger::try_init();
 
@@ -333,7 +338,7 @@ async fn stransmit_decrypt() -> Result<(), Error> {
     Ok(())
 }
 
-#[tokio::test]
+#[compio::test]
 async fn stransmit_encrypt_rekey() -> Result<(), Error> {
     let _ = pretty_env_logger::try_init();
 
@@ -368,7 +373,7 @@ async fn stransmit_encrypt_rekey() -> Result<(), Error> {
 }
 
 // reported by @ian-spoonradio
-#[tokio::test]
+#[compio::test]
 #[cfg(not(target_os = "windows"))]
 async fn test_c_client_interop() -> Result<(), Error> {
     let _ = pretty_env_logger::try_init();
@@ -398,7 +403,7 @@ async fn test_c_client_interop() -> Result<(), Error> {
     Ok(())
 }
 
-#[tokio::test]
+#[compio::test]
 #[cfg(not(target_os = "windows"))]
 async fn bidirectional_interop() -> Result<(), Error> {
     #[cfg(target_os = "macos")]
@@ -435,10 +440,10 @@ async fn bidirectional_interop() -> Result<(), Error> {
     Ok(())
 }
 
-#[tokio::test]
+#[compio::test]
 #[cfg(not(target_os = "windows"))]
 async fn bidirectional_interop_encrypt_rekey() -> Result<(), Error> {
-    use tokio::time::sleep;
+    use compio::time::sleep;
 
     #[cfg(target_os = "macos")]
     if Instant::now().elapsed() < Duration::MAX {

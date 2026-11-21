@@ -4,9 +4,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use futures::channel::oneshot;
 use futures::{channel::mpsc, future::Fuse, prelude::*, select, FutureExt, SinkExt};
 use srt_protocol::{connection::Connection, listener::*, packet::*, settings::ConnInitSettings};
-use futures::channel::oneshot;
 
 use crate::{net::PacketSocket, watch};
 

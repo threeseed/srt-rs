@@ -1,8 +1,8 @@
-use srt_tokio::SrtSocket;
+use futures::TryStreamExt;
+use srt_compio::SrtSocket;
 use std::io::Error;
-use tokio_stream::StreamExt;
 
-#[tokio::main]
+#[compio::main]
 async fn main() -> Result<(), Error> {
     let mut srt_socket = SrtSocket::builder().call("127.0.0.1:3333", None).await?;
     let mut count = 0;

@@ -2,11 +2,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Error;
 use bytes::Bytes;
+use compio::time::sleep;
 use futures::prelude::*;
-use srt_tokio::{SocketStatistics, SrtSocket};
-use tokio::time::sleep;
+use srt_compio::{SocketStatistics, SrtSocket};
 
-#[tokio::test]
+#[compio::test]
 async fn test() {
     let _ = pretty_env_logger::try_init();
 

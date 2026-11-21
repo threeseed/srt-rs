@@ -31,13 +31,7 @@ pub fn channel<T: 'static + Debug + Default + Clone + Send + Sync + Unpin>(
         receivers: 1,
         wakers: Vec::new(),
     }));
-    (
-        Sender(shared.clone()),
-        Receiver {
-            shared,
-            seen: None,
-        },
-    )
+    (Sender(shared.clone()), Receiver { shared, seen: None })
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -52,7 +46,9 @@ impl<T> Display for SendError<T> {
 impl<T: Debug> std::error::Error for SendError<T> {}
 
 #[derive(Debug)]
-pub struct Sender<T: 'static + Debug + Default + Clone + Send + Sync + Unpin>(Arc<Mutex<Shared<T>>>);
+pub struct Sender<T: 'static + Debug + Default + Clone + Send + Sync + Unpin>(
+    Arc<Mutex<Shared<T>>>,
+);
 
 impl<T: 'static + Debug + Default + Clone + Send + Sync + Unpin> Sender<T> {
     pub fn send(&self, item: T) -> Result<(), SendError<T>> {

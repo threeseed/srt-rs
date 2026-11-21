@@ -1,13 +1,13 @@
 use std::time::Instant;
 
 use bytes::Bytes;
+use compio::{runtime::JoinHandle, time::sleep_until};
 use futures::{channel::mpsc, prelude::*, select, stream::StreamExt};
 use log::{error, trace};
 use srt_protocol::{
     connection::{Action, Connection, ConnectionSettings, DuplexConnection, Input},
     packet::TimeSpan,
 };
-use compio::{runtime::JoinHandle, time::sleep_until};
 
 use crate::{net::PacketSocket, watch, SocketStatistics, SrtSocket};
 

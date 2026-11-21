@@ -1,5 +1,5 @@
 #[cfg(feature = "ac-ffmpeg")]
-#[tokio::main]
+#[compio::main]
 async fn main() -> anyhow::Result<()> {
     use std::{
         env::args,
@@ -17,14 +17,12 @@ async fn main() -> anyhow::Result<()> {
         time::Timestamp,
     };
     use bytes::Bytes;
-    use futures::SinkExt;
-    use srt_tokio::SrtSocket;
-    use tokio::{
-        runtime::Handle,
-        sync::mpsc::{channel, Sender},
-        time::sleep_until,
+    use compio::time::sleep_until;
+    use futures::{
+        channel::mpsc::{channel, Sender},
+        SinkExt, StreamExt,
     };
-    use tokio_stream::StreamExt;
+    use srt_compio::SrtSocket;
 
     struct WriteBridge(Sender<(Instant, Bytes)>);
     impl Write for WriteBridge {
@@ -45,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            Handle::current().block_on(async { Ok(()) })
+            Ok(())
         }
     }
 
@@ -96,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (chan_send, chan_recv) = channel(1024);
 
-    let demuxer_task = tokio::spawn(async move {
+    let demuxer_task = compio::runtime::spawn(async move {
         let streams = demuxer
             .streams()
             .iter()
@@ -123,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         let d_t = pts - last_pts;
                         let deadline = last_inst + d_t;
-                        sleep_until(deadline.into()).await;
+                        sleep_until(deadline).await;
                         last_pts_inst = Some((pts, deadline));
                         deadline
                     }
@@ -144,11 +142,13 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let mut stream = tokio_stream::wrappers::ReceiverStream::new(chan_recv).map(Ok::<_, io::Error>);
+    let mut stream = chan_recv.map(Ok::<_, io::Error>);
     socket.send_all(&mut stream).await?;
     socket.close().await?;
 
-    demuxer_task.await?;
+    demuxer_task
+        .await
+        .map_err(|e| anyhow::anyhow!("demuxer task failed: {e:?}"))?;
 
     Ok(())
 }

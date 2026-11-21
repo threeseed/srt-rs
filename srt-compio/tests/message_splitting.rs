@@ -4,12 +4,12 @@ use anyhow::Result;
 use bytes::Bytes;
 use futures::prelude::*;
 
-use srt_tokio::SrtSocket;
-use tokio::time::sleep;
+use compio::time::sleep;
+use srt_compio::SrtSocket;
 
 const PACKET_SIZE: usize = 15 * 1500;
 
-#[tokio::test]
+#[compio::test]
 async fn message_splitting() -> Result<()> {
     let _ = pretty_env_logger::try_init();
 
@@ -24,7 +24,7 @@ async fn message_splitting() -> Result<()> {
     // send a really really long packet
     let long_message = Bytes::from(&[b'8'; PACKET_SIZE][..]);
 
-    let sender = tokio::spawn(async move {
+    let sender = compio::runtime::spawn(async move {
         let mut sender = sender.await?;
         sender.send((Instant::now(), long_message)).await?;
         sleep(Duration::from_secs(5)).await;

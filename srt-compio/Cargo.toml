@@ -38,6 +38,7 @@ default-features = false
 version = "0.19.2"
 
 [dev-dependencies]
+compio = { version = "0.19.2", default-features = false, features = ["macros", "time", "net", "runtime", "io-uring", "process"] }
 futures = { version = "0.3", features = ["executor"] }
 anyhow = "1"
 lazy_static = "1"

@@ -1,11 +1,11 @@
-use srt_tokio::{options::*, SrtSocket};
+use srt_compio::{options::*, SrtSocket};
 
 use bytes::Bytes;
+use compio::runtime::spawn;
 use futures::{future, stream, SinkExt, StreamExt, TryStreamExt};
 use std::time::{Duration, Instant};
-use tokio::spawn;
 
-#[tokio::test]
+#[compio::test]
 async fn bidirectional() {
     let _ = pretty_env_logger::try_init();
 
@@ -15,7 +15,7 @@ async fn bidirectional() {
     let b = SrtSocket::bind(ListenerOptions::new(":5000").unwrap().into());
 
     let mut join_handles = vec![];
-    for fut in vec![a, b] {
+    for fut in [a, b] {
         join_handles.push(spawn(async move {
             let side = fut.await.unwrap();
             let (mut s, mut r) = side.split();
@@ -28,10 +28,13 @@ async fn bidirectional() {
                 }
                 assert_eq!(r.try_next().await.unwrap(), None);
             });
-            let mut counting_stream =
-                tokio_stream::StreamExt::throttle(stream::iter(0..ITERS), Duration::from_millis(1))
-                    .map(|i| Ok((Instant::now(), Bytes::from(i.to_string()))))
-                    .boxed();
+            let mut counting_stream = stream::iter(0..ITERS)
+                .then(|i| async move {
+                    compio::time::sleep(Duration::from_millis(1)).await;
+                    i
+                })
+                .map(|i| Ok((Instant::now(), Bytes::from(i.to_string()))))
+                .boxed_local();
 
             s.send_all(&mut counting_stream).await.unwrap();
             s.close().await.unwrap();

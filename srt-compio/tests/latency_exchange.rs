@@ -1,7 +1,7 @@
 use anyhow::Result;
-use srt_tokio::SrtSocket;
+use compio::time::sleep;
+use srt_compio::SrtSocket;
 use std::time::Duration;
-use tokio::time::sleep;
 
 use futures::prelude::*;
 
@@ -49,7 +49,7 @@ async fn test_latency_exchange(
     Ok(())
 }
 
-#[tokio::test]
+#[compio::test]
 async fn latency_exchange() -> Result<()> {
     let from_secs = Duration::from_secs;
 

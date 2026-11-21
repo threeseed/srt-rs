@@ -10,7 +10,7 @@ use srt_protocol::{
     settings::KeySettings,
 };
 
-use srt_tokio::{
+use srt_compio::{
     options::{KeySize, StreamId},
     SrtListener, SrtSocket,
 };
@@ -46,14 +46,14 @@ fn accept(streamid: Option<&StreamId>) -> Result<AcceptParameters, RejectReason>
     Err(RejectReason::Server(ServerRejectReason::Unimplemented))
 }
 
-#[tokio::test]
+#[compio::test]
 async fn streamid() -> io::Result<()> {
     let _ = pretty_env_logger::try_init();
 
     let (mut server, mut incoming) = SrtListener::builder().bind(2000).await.unwrap();
-    let listener = tokio::spawn(async move {
+    let listener = compio::runtime::spawn(async move {
         while let Some(request) = incoming.incoming().next().await {
-            tokio::spawn(async move {
+            compio::runtime::spawn(async move {
                 let mut sender = match accept(request.stream_id()) {
                     Ok(mut ap) => request.accept(ap.take_key_settings()).await.unwrap(),
                     Err(rr) => {
@@ -68,14 +68,15 @@ async fn streamid() -> io::Result<()> {
                 sender.send_all(&mut stream).await.unwrap();
                 sender.close().await.unwrap();
                 info!("Sender finished");
-            });
+            })
+            .detach();
         }
     });
 
     // connect 10 clients to it
     let mut join_handles = vec![];
     for i in 0..10 {
-        join_handles.push(tokio::spawn(async move {
+        join_handles.push(compio::runtime::spawn(async move {
             let stream_id = AccessControlList(vec![
                 StandardAccessControlEntry::UserName("russell".into()).into(),
                 StandardAccessControlEntry::ResourceName(format!("{i}")).into(),
@@ -117,11 +118,11 @@ async fn streamid() -> io::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[compio::test]
 async fn set_password() {
     let (mut server, mut incoming) = SrtListener::builder().bind(2001).await.unwrap();
 
-    let listener = tokio::spawn(async move {
+    let listener = compio::runtime::spawn(async move {
         while let Some(request) = incoming.incoming().next().await {
             let passphrase = request.stream_id().unwrap().as_str().into();
 
@@ -135,11 +136,12 @@ async fn set_password() {
                 let mut stream =
                     stream::iter(Some(Ok((Instant::now(), Bytes::from("asdf")))).into_iter());
 
-                tokio::spawn(async move {
+                compio::runtime::spawn(async move {
                     sender.send_all(&mut stream).await.unwrap();
                     sender.close().await.unwrap();
                     info!("Sender finished");
-                });
+                })
+                .detach();
             }
         }
     });

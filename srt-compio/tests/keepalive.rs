@@ -1,14 +1,14 @@
-use srt_tokio::SrtSocket;
+use srt_compio::SrtSocket;
 
 use bytes::Bytes;
+use compio::time::sleep;
 use futures::prelude::*;
 use std::time::{Duration, Instant};
-use tokio::time::sleep;
 
 // Tests opening a connection, and waiting a while then sending stuff
 // it should be able to keep the connection alive
 // exp total time is 8 seconds, so this should timeout if KeepAlives's aren't properly implemented
-#[tokio::test]
+#[compio::test]
 async fn keepalive() {
     let _ = pretty_env_logger::try_init();
 

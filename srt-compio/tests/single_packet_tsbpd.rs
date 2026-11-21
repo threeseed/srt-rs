@@ -1,15 +1,15 @@
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use compio::time::sleep;
 use futures::prelude::*;
 use log::info;
 use srt_protocol::packet::TimeSpan;
-use tokio::time::sleep;
 
-use srt_tokio::SrtSocket;
+use srt_compio::SrtSocket;
 
 /// Send a single packet, with a large tsbpd, then close. Make sure it gets delivered with the delay.
-#[tokio::test]
+#[compio::test]
 async fn single_packet_tsbpd() {
     let _ = pretty_env_logger::try_init();
 

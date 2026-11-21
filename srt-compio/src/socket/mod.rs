@@ -14,6 +14,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use compio::{net::UdpSocket, runtime::JoinHandle};
 use futures::{
     channel::mpsc::{self, TrySendError},
     prelude::*,
@@ -24,7 +25,6 @@ use srt_protocol::{
     connection::ConnectionSettings,
     options::{OptionsError, OptionsOf, SocketOptions, Validation},
 };
-use compio::{net::UdpSocket, runtime::JoinHandle};
 
 use super::{net::*, options::BindOptions, watch};
 

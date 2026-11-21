@@ -304,9 +304,9 @@ mod tests {
     #[compio::test]
     async fn multiplex_timeout() {
         use bytes::Bytes;
+        use compio::time::sleep;
         use futures::{stream, SinkExt, StreamExt};
         use log::info;
-        use compio::time::sleep;
 
         use srt_protocol::options::*;
 

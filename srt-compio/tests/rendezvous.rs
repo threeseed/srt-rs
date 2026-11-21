@@ -1,11 +1,11 @@
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use compio::time::sleep;
 use futures::{join, prelude::*};
-use srt_tokio::SrtSocket;
-use tokio::time::sleep;
+use srt_compio::SrtSocket;
 
-#[tokio::test]
+#[compio::test]
 async fn rendezvous() {
     let _ = pretty_env_logger::try_init();
 

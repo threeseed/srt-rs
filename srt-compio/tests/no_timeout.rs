@@ -1,4 +1,4 @@
-use srt_tokio::SrtSocket;
+use srt_compio::SrtSocket;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures::prelude::*;
 
 // Sending 1 every second for 30 seconds
-#[tokio::test]
+#[compio::test]
 async fn receiver_timeout() {
     let _ = pretty_env_logger::try_init();
 
@@ -16,10 +16,13 @@ async fn receiver_timeout() {
     const ITERS: usize = 30;
 
     let sender = async move {
-        let mut counting_stream =
-            tokio_stream::StreamExt::throttle(stream::iter(0..ITERS), Duration::from_secs(1))
-                .map(|i| Ok((Instant::now(), Bytes::from(i.to_string()))))
-                .boxed();
+        let mut counting_stream = stream::iter(0..ITERS)
+            .then(|i| async move {
+                compio::time::sleep(Duration::from_secs(1)).await;
+                i
+            })
+            .map(|i| Ok((Instant::now(), Bytes::from(i.to_string()))))
+            .boxed_local();
 
         let mut s = a.await.unwrap();
         s.send_all(&mut counting_stream).await.unwrap();

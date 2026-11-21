@@ -1,9 +1,9 @@
 use std::{env::args, io::Error, process::exit};
 
-use srt_tokio::{access::*, SrtSocket};
-use tokio_stream::StreamExt;
+use futures::TryStreamExt;
+use srt_compio::{access::*, SrtSocket};
 
-#[tokio::main]
+#[compio::main]
 async fn main() -> Result<(), Error> {
     if args().len() != 2 {
         eprintln!("Usage: cargo run --example=connect_streamid <username>");

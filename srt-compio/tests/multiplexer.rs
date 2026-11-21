@@ -1,19 +1,19 @@
 use std::time::Instant;
 
-use srt_tokio::{SrtListener, SrtSocket};
+use srt_compio::{SrtListener, SrtSocket};
 
 use anyhow::Result;
 use bytes::Bytes;
 use futures::{channel::oneshot, future::join_all, stream, FutureExt, SinkExt, StreamExt};
 use log::info;
 
-#[tokio::test]
+#[compio::test]
 async fn multiplexer() -> Result<()> {
     let _ = pretty_env_logger::try_init();
 
     let (finished_send, finished_recv) = oneshot::channel();
 
-    let listener = tokio::spawn(async {
+    let listener = compio::runtime::spawn(async {
         let (_server, mut incoming) = SrtListener::builder().bind(2000).await.unwrap();
 
         let mut fused_finish = finished_recv.fuse();
@@ -23,18 +23,19 @@ async fn multiplexer() -> Result<()> {
             let mut stream =
                 stream::iter(Some(Ok((Instant::now(), Bytes::from("asdf")))).into_iter());
 
-            tokio::spawn(async move {
+            compio::runtime::spawn(async move {
                 sender.send_all(&mut stream).await.unwrap();
                 sender.close().await.unwrap();
                 info!("Sender finished");
-            });
+            })
+            .detach();
         }
     });
 
     // connect 10 clients to it
     let mut join_handles = vec![];
     for _ in 0..3 {
-        join_handles.push(tokio::spawn(async move {
+        join_handles.push(compio::runtime::spawn(async move {
             let mut recvr = SrtSocket::builder()
                 .call("127.0.0.1:2000", None)
                 .await
@@ -54,7 +55,7 @@ async fn multiplexer() -> Result<()> {
     join_all(join_handles).await;
     info!("all finished");
     finished_send.send(()).unwrap();
-    listener.await?;
+    listener.await.expect("listener task");
     Ok(())
 }
 

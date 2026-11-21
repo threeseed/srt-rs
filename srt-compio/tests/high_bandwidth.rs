@@ -7,20 +7,19 @@ use anyhow::Error;
 use bytes::Bytes;
 use futures::{stream, FutureExt, SinkExt, Stream, StreamExt};
 use log::{error, info};
-use tokio::select;
 
-use srt_tokio::{options::*, SocketStatistics, SrtSocket};
+use srt_compio::{options::*, SocketStatistics, SrtSocket};
 
 fn stream_exact(duration: Duration) -> impl Stream<Item = Bytes> {
     let message = Bytes::from(vec![5; 1024]);
-    let first = tokio::time::Instant::now();
+    let first = Instant::now();
     // This will momentarily double the data rate for the first few seconds, pushing the flow
     // window, send and receive buffers past their limits. The connection should recover once the
     // input data rate is stabilized.
     stream::unfold(
         (message, first, duration / 2),
         move |(message, last, d)| async move {
-            tokio::time::sleep_until(last + d).await;
+            compio::time::sleep_until(last + d).await;
             if first.elapsed() < Duration::from_secs(3) {
                 Some((message.clone(), (message, last + d, d)))
             } else {
@@ -36,7 +35,7 @@ enum Select {
     Statistics(SocketStatistics),
 }
 
-#[tokio::test]
+#[compio::test]
 async fn high_bandwidth() -> Result<(), Error> {
     use srt_protocol::options::LiveBandwidthMode::*;
     let _ = pretty_env_logger::try_init();
@@ -60,7 +59,7 @@ async fn high_bandwidth() -> Result<(), Error> {
 
         let mut stream_gbps = stream_exact(Duration::from_micros(1_000_000 / 1024 / RATE_MBPS))
             .map(|bytes| Ok((Instant::now(), bytes)))
-            .boxed();
+            .boxed_local();
 
         info!("Sender all connected");
 
@@ -123,11 +122,11 @@ async fn high_bandwidth() -> Result<(), Error> {
         Ok::<_, Error>(())
     };
 
-    let send = tokio::spawn(sender_fut).fuse();
-    let recv = tokio::spawn(recv_fut).fuse();
-    let timeout = tokio::time::sleep(Duration::from_secs(60)).fuse();
+    let mut send = compio::runtime::spawn(sender_fut).fuse();
+    let mut recv = compio::runtime::spawn(recv_fut).fuse();
+    let mut timeout = Box::pin(compio::time::sleep(Duration::from_secs(60))).fuse();
 
-    select!(
+    futures::select!(
         result = send => error!("send: {:?}", result),
         result = recv => error!("recv: {:?}", result),
         _ = timeout => { }
