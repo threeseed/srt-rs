@@ -24,12 +24,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use srt_tokio::bind_socket;
-
-use tokio::{
-    runtime::{self, Runtime},
-    time::timeout,
-};
+use crate::runtime;
+use futures::future::Either;
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -251,7 +247,6 @@ pub struct SRT_TRACEBSTATS {
 }
 
 #[repr(C)]
-#[repr(C)]
 pub struct SRT_MSGCTRL {
     /// Left for future
     flags: c_int,
@@ -319,17 +314,8 @@ pub const SRT_SYNC_CLOCK_IA32_RDTSC: c_int = 6;
 pub const SRT_SYNC_CLOCK_IA64_ITC: c_int = 7;
 
 lazy_static! {
-    // xxx: remove
-    pub static ref TOKIO_RUNTIME: Runtime = {
-        let rt = runtime::Builder::new_multi_thread().worker_threads(3).enable_all().build().unwrap();
-
-        #[cfg(feature = "console-subscriber")]
-        console_subscriber::init();
-        rt
-    };
     static ref SOCKETS: RwLock<BTreeMap<CSrtSocket, Arc<Mutex<SocketData>>>> =
         RwLock::new(BTreeMap::new());
-
     static ref BASE_TIME: Instant = Instant::now();
 }
 
@@ -339,7 +325,7 @@ pub fn get_sock(sock: CSrtSocket) -> Option<Arc<Mutex<SocketData>>> {
 
 #[no_mangle]
 pub extern "C" fn srt_startup() -> c_int {
-    lazy_static::initialize(&TOKIO_RUNTIME);
+    runtime::init();
     lazy_static::initialize(&SOCKETS);
     lazy_static::initialize(&BASE_TIME);
 
@@ -397,11 +383,8 @@ pub extern "C" fn srt_bind(
 
     opts.connect.local = name;
 
-    let socket = TOKIO_RUNTIME.block_on(async {
-        bind_socket(&opts)
-            .await
-            .map_err(|e| SrtError::new(SRT_EBINDCONFLICT, format!("{}", e)))
-    });
+    let socket = crate::socket::bind_std_socket(&opts)
+        .map_err(|e| SrtError::new(SRT_EBINDCONFLICT, format!("{}", e)));
 
     let socket = match socket {
         Ok(socket) => socket,
@@ -802,15 +785,17 @@ pub extern "C" fn srt_recv(sock: SRTSOCKET, buf: *mut c_char, len: c_int) -> c_i
 
     let mut l = sock.lock().unwrap();
     if let SocketData::Established(ref mut sock, opts) = *l {
-        TOKIO_RUNTIME.block_on(async {
+        futures::executor::block_on(async {
             let d = if opts.rcv_syn {
                 // block
                 sock.next().await
             } else {
                 // nonblock
-                match timeout(Duration::from_millis(10), sock.next()).await {
-                    Err(_) => return set_error(SRT_EASYNCRCV.into()),
-                    Ok(d) => d,
+                let timeout = runtime::sleep(Duration::from_millis(10));
+                futures::pin_mut!(timeout);
+                match futures::future::select(sock.next(), timeout).await {
+                    Either::Left((d, _)) => d,
+                    Either::Right(_) => return set_error(SRT_EASYNCRCV.into()),
                 }
             };
 
@@ -1084,25 +1069,24 @@ pub extern "C" fn srt_close(socknum: SRTSOCKET) -> c_int {
     let mut retcode = SRT_SUCCESS;
 
     let mut l = sock.lock().unwrap();
-    match &mut *l {
-        SocketData::Established(ref mut s, _) => {
-            let res = TOKIO_RUNTIME.block_on(async move { s.close_and_finish().await });
+    match mem::replace(&mut *l, SocketData::Closed) {
+        SocketData::Established(mut s, _) => {
+            drop(l); // don't hold the lock while waiting on the runtime thread
+            let res = runtime::block_on(move || async move { s.close_and_finish().await });
             if let Err(e) = res {
                 retcode = set_error(SrtError::new(
                     SRT_EINVOP,
                     format_args!("Failed to close socket: {e}"),
                 ));
             }
-            *l = SocketData::Closed
         }
-        SocketData::Listening(ref mut listener, _, jh, _) => {
-            TOKIO_RUNTIME.block_on(async {
-                listener.close().await;
-                jh.await.unwrap();
-            });
-            *l = SocketData::Closed;
+        SocketData::Listening(mut listener, _, accept_done, _) => {
+            drop(l);
+            runtime::block_on(move || async move { listener.close().await });
+            // wait for the accept task to finish; it signals by dropping its sender
+            let _ = futures::executor::block_on(accept_done);
         }
-        _ => (),
+        other => *l = other,
     }
 
     let mut sockets = SOCKETS.write().unwrap();

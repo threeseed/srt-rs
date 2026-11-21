@@ -5,21 +5,66 @@ use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
-use futures::future::poll_fn;
-use futures::{pending, poll, SinkExt};
-use tokio::io::unix::AsyncFd;
-use tokio::io::Interest;
-use tokio::pin;
-use tokio::time::sleep;
+use futures::future::{poll_fn, select};
+use futures::{pin_mut, poll, SinkExt};
 
-use crate::c_api::{get_sock, SrtError, SYSSOCKET, TOKIO_RUNTIME};
+use crate::c_api::{get_sock, SrtError, SYSSOCKET};
 use crate::errors::SRT_ERRNO::*;
+use crate::runtime;
 use crate::socket::{CSrtSocket, SocketData};
+
+/// How often system sockets are re-polled while waiting, as their readiness has no waker.
+const SYS_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 #[derive(Debug)]
 enum SrtEpollEntry {
     Srt(CSrtSocket, EpollFlags),
-    Sys(AsyncFd<SYSSOCKET>, EpollFlags),
+    Sys(SYSSOCKET, EpollFlags),
+}
+
+/// Non-blocking readiness check of a system socket with `poll(2)`.
+fn poll_sys(fd: SYSSOCKET, flags: EpollFlags) -> (ReadyPendingError, ReadyPendingError) {
+    let mut events = 0;
+    if flags.contains(EpollFlags::IN) {
+        events |= libc::POLLIN;
+    }
+    if flags.contains(EpollFlags::OUT) {
+        events |= libc::POLLOUT;
+    }
+    let mut pfd = libc::pollfd {
+        fd,
+        events,
+        revents: 0,
+    };
+    let res = unsafe { libc::poll(&mut pfd, 1, 0) };
+    if res < 0 {
+        log::error!(
+            "poll on system socket {fd} failed: {}",
+            std::io::Error::last_os_error()
+        );
+        return (ReadyPendingError::Error, ReadyPendingError::Error);
+    }
+    let error = pfd.revents & (libc::POLLERR | libc::POLLNVAL) != 0;
+    let check = |mask| {
+        if error {
+            ReadyPendingError::Error
+        } else if pfd.revents & mask != 0 {
+            ReadyPendingError::Ready
+        } else {
+            ReadyPendingError::Pending
+        }
+    };
+    let read = if flags.contains(EpollFlags::IN) {
+        check(libc::POLLIN | libc::POLLHUP)
+    } else {
+        ReadyPendingError::Pending
+    };
+    let write = if flags.contains(EpollFlags::OUT) {
+        check(libc::POLLOUT)
+    } else {
+        ReadyPendingError::Pending
+    };
+    (read, write)
 }
 
 #[derive(Default)]
@@ -122,32 +167,17 @@ bitflags::bitflags! {
     }
 }
 
-impl EpollFlags {
-    fn to_interest(self) -> Interest {
-        match (
-            self.contains(EpollFlags::IN),
-            self.contains(EpollFlags::OUT),
-        ) {
-            (true, true) => Interest::READABLE | Interest::WRITABLE,
-            (true, false) => Interest::READABLE,
-            (false, true) => Interest::WRITABLE,
-            (false, false) => panic!("interest must be either writable or readable"),
-        }
-    }
-}
-
 impl SrtEpoll {
     pub fn add_srt(&mut self, s: CSrtSocket, flags: EpollFlags) {
         self.socks.push(SrtEpollEntry::Srt(s, flags));
     }
 
     pub fn add_sys(&mut self, s: SYSSOCKET, flags: EpollFlags) {
-        TOKIO_RUNTIME.block_on(async {
-            self.socks.push(SrtEpollEntry::Sys(
-                AsyncFd::with_interest(s, flags.to_interest()).unwrap(),
-                flags,
-            ));
-        });
+        assert!(
+            flags.intersects(EpollFlags::IN | EpollFlags::OUT),
+            "interest must be either writable or readable"
+        );
+        self.socks.push(SrtEpollEntry::Sys(s, flags));
     }
 
     pub fn remove_srt(&mut self, sock: CSrtSocket) -> Result<(), SrtError> {
@@ -189,14 +219,19 @@ impl SrtEpoll {
     ) -> Result<(usize, usize, usize, usize), SrtError> {
         let sleep_fut = async {
             if let Some(to) = timeout {
-                sleep(to).await;
+                runtime::sleep(to).await;
             } else {
                 std::future::pending::<()>().await;
             }
         };
-        pin!(sleep_fut);
+        pin_mut!(sleep_fut);
 
-        TOKIO_RUNTIME.block_on(async {
+        let has_sys = self
+            .socks
+            .iter()
+            .any(|s| matches!(s, SrtEpollEntry::Sys(_, _)));
+
+        futures::executor::block_on(async {
             let mut written_wfds = 0;
             let mut written_rfds = 0;
 
@@ -287,27 +322,7 @@ impl SrtEpoll {
                             }
                         }
                         SrtEpollEntry::Sys(sock, flags) => {
-                            let ready_recv = if flags.contains(EpollFlags::IN) {
-                                poll!(poll_fn(|cx| sock.poll_read_ready(cx)))
-                                    .map_ok(|mut r| {
-                                        r.clear_ready();
-                                        r
-                                    })
-                                    .into()
-                            } else {
-                                ReadyPendingError::Pending
-                            };
-                            let ready_send = if flags.contains(EpollFlags::OUT) {
-                                poll!(poll_fn(|cx| sock.poll_write_ready(cx)))
-                                    .map_ok(|mut r| {
-                                        r.clear_ready();
-                                        r
-                                    })
-                                    .into()
-                            } else {
-                                ReadyPendingError::Pending
-                            };
-
+                            let (ready_recv, ready_send) = poll_sys(*sock, *flags);
                             Some((idx, ready_recv, ready_send, *flags))
                         }
                     };
@@ -329,7 +344,7 @@ impl SrtEpoll {
                                     written_rfds += 1;
                                 }
                                 SrtEpollEntry::Sys(fd, _) => {
-                                    sys_read[written_lrfds].write(*fd.get_ref());
+                                    sys_read[written_lrfds].write(*fd);
                                     written_lrfds += 1;
                                 }
                             }
@@ -344,7 +359,7 @@ impl SrtEpoll {
                                     written_wfds += 1;
                                 }
                                 SrtEpollEntry::Sys(fd, _) => {
-                                    sys_write[written_lwfds].write(*fd.get_ref());
+                                    sys_write[written_lwfds].write(*fd);
                                     written_lwfds += 1;
                                 }
                             }
@@ -364,7 +379,24 @@ impl SrtEpoll {
                     && written_lrfds == 0
                     && written_lwfds == 0
                 {
-                    pending!();
+                    // wait until one of the SRT wakers registered above fires (or the timeout),
+                    // and, if system sockets are watched, at most SYS_POLL_INTERVAL
+                    let mut yielded = false;
+                    let woken = poll_fn(|_| {
+                        if yielded {
+                            Poll::Ready(())
+                        } else {
+                            yielded = true;
+                            Poll::Pending
+                        }
+                    });
+                    if has_sys {
+                        let tick = runtime::sleep(SYS_POLL_INTERVAL);
+                        pin_mut!(tick);
+                        select(woken, tick).await;
+                    } else {
+                        woken.await;
+                    }
                     continue;
                 } else {
                     break;

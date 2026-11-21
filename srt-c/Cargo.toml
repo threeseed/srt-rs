@@ -3,7 +3,7 @@ name = "srt-c"
 version = "0.4.4"
 edition = "2021"
 publish = true
-description = "API compatabile libsrt reimplementation using srt-tokio"
+description = "API compatabile libsrt reimplementation using srt-compio"
 license = "Apache-2.0"
 
 [lib]
@@ -15,17 +15,18 @@ srt-protocol = {version = "0.4.4", path = "../srt-protocol"}
 lazy_static = "1"
 libc = "0.2"
 bytes = "1"
-futures = "0.3"
+futures = { version = "0.3", features = ["executor"] }
+socket2 = "0.5"
 log = "0.4"
 thiserror = "1"
 os_socketaddr = "0.2.4"
 pretty_env_logger = "0.5"
 bitflags = "2"
-console-subscriber = { version = "0.2", optional = true }
 
-[dependencies.tokio]
-version = "1"
-features = ["rt", "rt-multi-thread", "time"]
+[dependencies.compio]
+version = "0.19.2"
+default-features = false
+features = ["runtime", "time", "net", "io-uring"]
 
 [build-dependencies]
 cc = "1.0"

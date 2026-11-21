@@ -15,11 +15,13 @@ use std::{
     time::Duration,
 };
 
+use futures::channel::oneshot;
 use futures::{
     channel::mpsc, future::Shared, poll, stream::Peekable, FutureExt, SinkExt, StreamExt,
 };
 use log::warn;
 use os_socketaddr::OsSocketAddr;
+use srt_compio::{SrtIncoming, SrtListener, SrtSocket};
 use srt_protocol::{
     connection::ConnectionSettings,
     options::{
@@ -28,13 +30,35 @@ use srt_protocol::{
     },
     settings::{KeySettings, KeySize, Passphrase},
 };
-use srt_tokio::{SrtListener, SrtSocket};
-use tokio::{net::UdpSocket, sync::oneshot, task::JoinHandle};
+use std::net::UdpSocket;
 
 use crate::c_api::{
     get_sock, insert_socket, srt_close, srt_listen_callback_fn, SrtError, SRTSOCKET, SRT_SOCKOPT,
-    TOKIO_RUNTIME,
 };
+use crate::runtime;
+
+/// Create and bind a UDP socket the same way `srt_compio::bind_socket` does, but as a
+/// `std::net::UdpSocket` so it can be stored in (`Send`) socket state and handed to the compio
+/// runtime thread later.
+pub fn bind_std_socket(options: &SocketOptions) -> io::Result<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(
+        if options.connect.local.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        },
+        Type::DGRAM,
+        Some(Protocol::UDP),
+    )?;
+    let send_buffer_size = usize::try_from(options.connect.udp_send_buffer_size.0).unwrap();
+    let recv_buffer_size = usize::try_from(options.connect.udp_recv_buffer_size.0).unwrap();
+    socket.set_nonblocking(true)?;
+    socket.set_recv_buffer_size(recv_buffer_size)?;
+    socket.set_send_buffer_size(send_buffer_size)?;
+    socket.bind(&options.connect.local.into())?;
+    Ok(socket.into())
+}
 use crate::errors::SRT_ERRNO::{self, *};
 
 static NEXT_SOCKID: AtomicI32 = AtomicI32::new(1);
@@ -59,12 +83,13 @@ pub struct CSrtSocket(i32);
 pub enum SocketData {
     Initialized(SocketOptions, Option<StreamId>, ApiOptions),
     Bound(SocketOptions, UdpSocket, Option<StreamId>, ApiOptions),
-    ConnectingNonBlocking(Shared<tokio::sync::oneshot::Receiver<()>>, ApiOptions),
+    ConnectingNonBlocking(Shared<oneshot::Receiver<()>>, ApiOptions),
     Established(SrtSocket, ApiOptions),
     Listening(
         SrtListener,
         Option<Peekable<mpsc::Receiver<(CSrtSocket, SocketAddr)>>>,
-        JoinHandle<()>,
+        // resolves (Canceled) once the accept task has finished
+        oneshot::Receiver<()>,
         ApiOptions,
     ),
     ConnectFailed(io::Error),
@@ -383,13 +408,13 @@ impl SocketData {
                 Ok(size_of::<i64>())
             }
             Str(str) => {
-                if optval_len < (str.as_bytes().len() + 1) {
+                if optval_len < (str.len() + 1) {
                     return Err(SRT_EINVPARAM.into());
                 }
                 let optval = slice::from_raw_parts_mut(optval.cast::<u8>().as_mut(), optval_len);
-                optval[..str.as_bytes().len()].copy_from_slice(str.as_bytes());
-                optval[str.as_bytes().len()] = 0; // null terminator
-                Ok(str.as_bytes().len())
+                optval[..str.len()].copy_from_slice(str.as_bytes());
+                optval[str.len()] = 0; // null terminator
+                Ok(str.len())
             }
         }
     }
@@ -400,91 +425,103 @@ impl SocketData {
             let options = ListenerOptions { socket: so }
                 .try_validate()
                 .map_err(|e| SrtError::new(SRT_EINVOP, e))?;
-            let (listener, mut incoming) = TOKIO_RUNTIME
-                .block_on(SrtListener::bind_with_socket(options, socket))
-                .map_err(|e| SrtError::new(SRT_EINVOP, e))?;
+            let (s, r) = mpsc::channel(1024);
+            let (accept_done_s, accept_done_r) = oneshot::channel::<()>();
+            let listener = runtime::block_on(move || async move {
+                let socket = compio::net::UdpSocket::from_std(socket)?;
+                let (listener, incoming) = SrtListener::bind_with_socket(options, socket).await?;
+                compio::runtime::spawn(Self::accept_loop(sock, incoming, s, accept_done_s))
+                    .detach();
+                Ok::<_, io::Error>(listener)
+            })
+            .map_err(|e| SrtError::new(SRT_EINVOP, e))?;
 
-            let (mut s, r) = mpsc::channel(1024);
-            let task = TOKIO_RUNTIME.spawn(async move {
-                let incoming_stream = incoming.incoming();
-                while let Some(req) = incoming_stream.next().await {
-                    let new_sock = insert_socket(SocketData::Accepting(None));
-
-                    // get latest opts--callback may be changed at any point
-                    let opts = {
-                        let l = sock.lock().unwrap();
-                        *l.api_opts().unwrap()
-                    };
-
-                    let req = req;
-                    let accept = if let Some(cb) = opts.listen_cb {
-                        let streamid_cstr = req
-                            .stream_id()
-                            .map(|id| CString::new(id.to_string()).unwrap());
-                        let streamid_ptr = match &streamid_cstr {
-                            Some(cstr) => cstr.as_ptr(),
-                            None => ptr::null(),
-                        };
-
-                        let mut ret: c_int = 0;
-
-                        let exception_thrown = unsafe {
-                            call_callback_wrap_exception(
-                                cb,
-                                opts.listen_cb_opaque,
-                                new_sock,
-                                5,
-                                OsSocketAddr::from(req.remote()).as_ptr(),
-                                streamid_ptr,
-                                &mut ret,
-                            )
-                        };
-
-                        exception_thrown == 0 && ret == 0
-                    } else {
-                        true
-                    };
-
-                    if !accept {
-                        // connection rejected! try again
-                        srt_close(new_sock);
-                        continue;
-                    }
-
-                    let new_sock_entry = get_sock(new_sock).expect("socket closed in a weird way?");
-                    let key_settings = {
-                        let mut l = new_sock_entry.lock().unwrap();
-                        if let SocketData::Accepting(ref mut key_settings) = *l {
-                            key_settings.take()
-                        } else {
-                            // uhh definitely strange
-                            continue;
-                        }
-                    };
-
-                    let remote = req.remote();
-                    let srt_socket = match req.accept(key_settings).await {
-                        Ok(sock) => sock,
-                        Err(_e) => continue, // TODO: remove from sockets
-                    };
-
-                    {
-                        let mut l = new_sock_entry.lock().unwrap();
-                        *l = SocketData::Established(srt_socket, opts);
-                    }
-
-                    if s.send((new_sock, remote)).await.is_err() {
-                        break;
-                    }
-                }
-            });
-            *self = SocketData::Listening(listener, Some(r.peekable()), task, initial_opts)
+            *self = SocketData::Listening(listener, Some(r.peekable()), accept_done_r, initial_opts)
         } else {
             *self = sd;
             return Err(SRT_ECONNSOCK.into());
         }
 
         Ok(())
+    }
+
+    async fn accept_loop(
+        sock: Arc<Mutex<SocketData>>,
+        mut incoming: SrtIncoming,
+        mut s: mpsc::Sender<(CSrtSocket, SocketAddr)>,
+        _accept_done: oneshot::Sender<()>,
+    ) {
+        let incoming_stream = incoming.incoming();
+        while let Some(req) = incoming_stream.next().await {
+            let new_sock = insert_socket(SocketData::Accepting(None));
+
+            // get latest opts--callback may be changed at any point
+            let opts = {
+                let l = sock.lock().unwrap();
+                *l.api_opts().unwrap()
+            };
+
+            let req = req;
+            let accept = if let Some(cb) = opts.listen_cb {
+                let streamid_cstr = req
+                    .stream_id()
+                    .map(|id| CString::new(id.to_string()).unwrap());
+                let streamid_ptr = match &streamid_cstr {
+                    Some(cstr) => cstr.as_ptr(),
+                    None => ptr::null(),
+                };
+
+                let mut ret: c_int = 0;
+
+                let exception_thrown = unsafe {
+                    call_callback_wrap_exception(
+                        cb,
+                        opts.listen_cb_opaque,
+                        new_sock,
+                        5,
+                        OsSocketAddr::from(req.remote()).as_ptr(),
+                        streamid_ptr,
+                        &mut ret,
+                    )
+                };
+
+                exception_thrown == 0 && ret == 0
+            } else {
+                true
+            };
+
+            if !accept {
+                // connection rejected! try again
+                srt_close(new_sock);
+                continue;
+            }
+
+            let new_sock_entry = get_sock(new_sock).expect("socket closed in a weird way?");
+            let key_settings = {
+                let mut l = new_sock_entry.lock().unwrap();
+                if let SocketData::Accepting(ref mut key_settings) = *l {
+                    key_settings.take()
+                } else {
+                    // uhh definitely strange
+                    continue;
+                }
+            };
+
+            let remote = req.remote();
+            let srt_socket = match req.accept(key_settings).await {
+                Ok(sock) => sock,
+                Err(_e) => continue, // TODO: remove from sockets
+            };
+
+            {
+                let mut l = new_sock_entry.lock().unwrap();
+                *l = SocketData::Established(srt_socket, opts);
+            }
+
+            if s.send((new_sock, remote)).await.is_err() {
+                break;
+            }
+        }
     }
 
     pub fn connect(
@@ -495,14 +532,18 @@ impl SocketData {
         let sd = replace(&mut *l, SocketData::InvalidIntermediateState);
 
         if let SocketData::Initialized(so, streamid, options) = sd {
-            let sb = SrtSocket::builder().with(so.clone());
             if options.rcv_syn {
                 drop(l); // drop lock to avoid holding lock during blocking call
 
-                // blocking mode, wait on oneshot
-                let sock = TOKIO_RUNTIME
-                    .block_on(async { sb.call(sa, streamid.as_ref().map(|s| s.as_str())).await })
-                    .map_err(|e| SrtError::new(SRT_ENOSERVER, e));
+                // blocking mode, wait for the runtime thread to finish connecting
+                let (so_c, streamid_c) = (so.clone(), streamid.clone());
+                let sock = runtime::block_on(move || async move {
+                    SrtSocket::builder()
+                        .with(so_c)
+                        .call(sa, streamid_c.as_ref().map(|s| s.as_str()))
+                        .await
+                })
+                .map_err(|e| SrtError::new(SRT_ENOSERVER, e));
 
                 let mut l = handle.lock().unwrap();
                 match sock {
@@ -519,8 +560,8 @@ impl SocketData {
                 // nonblocking mode
 
                 let (done_s, done_r) = oneshot::channel();
-                TOKIO_RUNTIME.spawn(async move {
-                    let res = sb.call(sa, None).await;
+                drop(runtime::spawn(move || async move {
+                    let res = SrtSocket::builder().with(so).call(sa, None).await;
                     let mut l = handle.lock().unwrap();
                     match res {
                         Ok(s) => {
@@ -530,7 +571,7 @@ impl SocketData {
                         }
                         Err(e) => *l = SocketData::ConnectFailed(e),
                     }
-                });
+                }));
                 *l = SocketData::ConnectingNonBlocking(done_r.shared(), options);
                 Ok(())
             }
@@ -553,18 +594,17 @@ impl SocketData {
             })?;
 
             drop(l); // release mutex so other calls don't block
-            let (new_sock, addr) = TOKIO_RUNTIME
-                .block_on(async {
-                    if opts.rcv_syn {
-                        Ok(incoming.next().await)
-                    } else {
-                        match poll!(incoming.next()) {
-                            Poll::Pending => Err(SRT_EASYNCFAIL),
-                            Poll::Ready(r) => Ok(r),
-                        }
+                     // the incoming channel is a plain futures channel, so it can be awaited on this thread
+            let result = futures::executor::block_on(async {
+                if opts.rcv_syn {
+                    Ok(incoming.next().await)
+                } else {
+                    match poll!(incoming.next()) {
+                        Poll::Pending => Err(SRT_EASYNCFAIL),
+                        Poll::Ready(r) => Ok(r),
                     }
-                })?
-                .ok_or_else(|| SrtError::new(SRT_ESCLOSED, "accepting socket closed"))?;
+                }
+            });
 
             // put listener back
             {
@@ -573,7 +613,7 @@ impl SocketData {
                     *in_state = Some(incoming);
                 }
             }
-            Ok((new_sock, addr))
+            result?.ok_or_else(|| SrtError::new(SRT_ESCLOSED, "accepting socket closed"))
         } else {
             Err(SRT_ENOLISTEN.into())
         }

@@ -51,6 +51,9 @@ fn main() {
         .file("tests/test_reuseaddr.cpp")
         .file("tests/test_socket_options.cpp")
         .include("../srt-c")
+        // the test objects are only referenced through gtest static registration, so the
+        // linker must keep every object in the archive
+        .link_lib_modifier("+whole-archive")
         .compile("units");
 
     println!("cargo:rustc-link-lib=gtest_main");
