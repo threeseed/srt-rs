@@ -671,9 +671,6 @@ async fn run() -> Result<(), Error> {
         .author("Russell Greene")
         .about("SRT sender and receiver written in rust");
 
-    #[cfg(feature = "console-subscriber")]
-    let app = app.arg(Arg::new("console").long("console"));
-
     let matches = app
         .arg(Arg::new("FROM").help("Sets the input url").required(true))
         .arg(
@@ -684,11 +681,6 @@ async fn run() -> Result<(), Error> {
         )
         .after_help(AFTER_HELPTEXT)
         .get_matches();
-
-    #[cfg(feature = "console-subscriber")]
-    if matches.is_present("console") {
-        console_subscriber::init();
-    }
 
     // these are required parameters, so unwrapping them is safe
     let from_str: &String = matches.get_one("FROM").unwrap();

@@ -41,7 +41,7 @@ pub async fn bind_with(
         let result = select! {
             now = tick_interval.tick().fuse() => {
                 trace!("caller interval elapsed, passing tick");
-                connect.handle_tick(now.into())
+                connect.handle_tick(now)
             }
             packet = socket.receive().fuse() => {
                 trace!("caller got packet {packet:?}");

@@ -30,7 +30,7 @@ pub async fn bind_with(
     let mut rendezvous = Rendezvous::new(local_addr, remote_public, init_settings, starting_seqno);
     loop {
         let result = select! {
-            now = tick_interval.tick().fuse() => rendezvous.handle_tick(now.into()),
+            now = tick_interval.tick().fuse() => rendezvous.handle_tick(now),
             packet = socket.receive().fuse() => rendezvous.handle_packet(packet, Instant::now()),
         };
 
