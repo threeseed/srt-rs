@@ -4,17 +4,21 @@ use std::{
     fmt::{Debug, Display, Formatter},
     io::{self, Cursor, ErrorKind},
     net::SocketAddr,
-    sync::Arc,
 };
 
-use bytes::BytesMut;
-use futures::channel::mpsc::Receiver;
+use compio::{
+    net::{ToSocketAddrsAsync, UdpSocket},
+    runtime::JoinHandle,
+    BufResult,
+};
 use futures::{channel::mpsc, prelude::*};
 use socket2::{Domain, Protocol, Socket, Type};
 use srt_protocol::packet::{Packet, ReceivePacketResult};
-use tokio::net::{lookup_host, UdpSocket};
 
 use crate::options::*;
+
+const MAX_DATAGRAM_SIZE: usize = 65536;
+const RECEIVE_QUEUE_SIZE: usize = 1024;
 
 pub async fn bind_socket(options: &SocketOptions) -> Result<UdpSocket, io::Error> {
     let socket = Socket::new(
@@ -30,7 +34,7 @@ pub async fn bind_socket(options: &SocketOptions) -> Result<UdpSocket, io::Error
     let send_buffer_size = usize::try_from(options.connect.udp_send_buffer_size.0).unwrap();
     let recv_buffer_size = usize::try_from(options.connect.udp_recv_buffer_size.0).unwrap();
 
-    socket.set_nonblocking(true)?; // required for passing to tokio
+    socket.set_nonblocking(true)?;
     socket.set_recv_buffer_size(recv_buffer_size)?;
     socket.set_send_buffer_size(send_buffer_size)?;
     socket.bind(&options.connect.local.into())?;
@@ -41,7 +45,8 @@ pub async fn bind_socket(options: &SocketOptions) -> Result<UdpSocket, io::Error
 pub async fn lookup_remote_host(remote: &SocketAddress) -> Result<SocketAddr, io::Error> {
     use SocketHost::*;
     let mut remote_address = match &remote.host {
-        Domain(domain) => lookup_host(format!("{domain}:0"))
+        Domain(domain) => format!("{domain}:0")
+            .to_socket_addrs_async()
             .await?
             .next()
             .ok_or_else(|| {
@@ -56,18 +61,28 @@ pub async fn lookup_remote_host(remote: &SocketAddress) -> Result<SocketAddr, io
     Ok(remote_address)
 }
 
+/// Packet oriented wrapper around a compio [`UdpSocket`].
+///
+/// Completion based I/O is not cancel safe in the way readiness based I/O is: dropping an
+/// in-flight `recv_from` loses the buffer and any datagram it completed with. Since packets are
+/// received inside `select!`s, the root `PacketSocket` runs a dedicated reader task that owns
+/// the receive side and forwards parsed packets through a channel, which is cancel safe.
 pub struct PacketSocket {
-    socket: Arc<UdpSocket>,
-    stream: Option<mpsc::Receiver<ReceivePacketResult>>,
-    buffer: BytesMut,
+    socket: UdpSocket,
+    stream: mpsc::Receiver<ReceivePacketResult>,
+    buffer: Vec<u8>,
+    reader: Option<JoinHandle<()>>,
 }
 
 impl PacketSocket {
-    pub fn from_socket(socket: Arc<UdpSocket>, buffer_capacity: usize) -> Self {
+    pub fn from_socket(socket: UdpSocket, buffer_capacity: usize) -> Self {
+        let (sender, stream) = mpsc::channel(RECEIVE_QUEUE_SIZE);
+        let reader = compio::runtime::spawn(Self::read_loop(socket.clone(), sender));
         Self {
             socket,
-            stream: None,
-            buffer: BytesMut::with_capacity(buffer_capacity),
+            stream,
+            buffer: Vec::with_capacity(buffer_capacity),
+            reader: Some(reader),
         }
     }
 
@@ -80,49 +95,58 @@ impl PacketSocket {
             packet_sender,
             Self {
                 socket: self.socket.clone(),
-                stream: Some(packet_receiver),
-                buffer: BytesMut::with_capacity(self.buffer.capacity()),
+                stream: packet_receiver,
+                buffer: Vec::with_capacity(self.buffer.capacity()),
+                reader: None,
             },
         )
     }
 
     pub async fn send(&mut self, packet: (Packet, SocketAddr)) -> Result<usize, io::Error> {
-        self.buffer.clear();
-        packet.0.serialize(&mut self.buffer);
-        self.socket.send_to(&self.buffer, packet.1).await
+        let mut buffer = std::mem::take(&mut self.buffer);
+        buffer.clear();
+        packet.0.serialize(&mut buffer);
+        let BufResult(result, buffer) = self.socket.send_to(buffer, packet.1).await;
+        self.buffer = buffer;
+        result
     }
 
     pub async fn receive(&mut self) -> ReceivePacketResult {
-        match self.stream.as_mut() {
-            Some(stream) => Self::stream_receive(stream).await,
-            None => self.socket_receive().await,
-        }
-    }
-
-    async fn stream_receive(stream: &mut Receiver<ReceivePacketResult>) -> ReceivePacketResult {
-        stream.next().await.unwrap_or_else(|| {
+        self.stream.next().await.unwrap_or_else(|| {
             Err(io::Error::new(ErrorKind::NotConnected, PacketStreamClosedError).into())
         })
     }
 
-    async fn socket_receive(&mut self) -> ReceivePacketResult {
+    async fn read_loop(socket: UdpSocket, mut sender: mpsc::Sender<ReceivePacketResult>) {
+        let is_ipv6 = match socket.local_addr() {
+            Ok(addr) => addr.is_ipv6(),
+            Err(e) => {
+                let _ = sender.send(Err(e.into())).await;
+                return;
+            }
+        };
+        let mut buffer = Vec::with_capacity(MAX_DATAGRAM_SIZE);
         loop {
-            self.socket.readable().await?;
-            self.buffer.clear();
-            return match self.socket.try_recv_buf_from(&mut self.buffer) {
-                Ok((size, from)) => self.parse(size, from),
-                Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
+            buffer.clear();
+            let BufResult(result, returned) = socket.recv_from(buffer).await;
+            buffer = returned;
+            let item = match result {
+                Ok((size, from)) => Packet::parse(&mut Cursor::new(&buffer[0..size]), is_ipv6)
+                    .map(|packet| (packet, from))
+                    .map_err(Into::into),
                 Err(e) => Err(e.into()),
             };
+            if sender.send(item).await.is_err() {
+                return;
+            }
         }
     }
+}
 
-    fn parse(&mut self, size: usize, from: SocketAddr) -> ReceivePacketResult {
-        let packet = Packet::parse(
-            &mut Cursor::new(&self.buffer[0..size]),
-            self.socket.local_addr()?.is_ipv6(),
-        )?;
-        Ok((packet, from))
+impl Drop for PacketSocket {
+    fn drop(&mut self) {
+        // dropping the handle cancels the reader task, releasing the socket
+        let _ = self.reader.take();
     }
 }
 
@@ -142,7 +166,7 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
 
-    #[tokio::test]
+    #[compio::test]
     async fn resolve_dns() {
         let socket_address = SocketAddress {
             host: SocketHost::Domain("localhost".to_string()),

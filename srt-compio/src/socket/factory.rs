@@ -7,7 +7,7 @@ use srt_protocol::{
     connection::{Action, Connection, ConnectionSettings, DuplexConnection, Input},
     packet::TimeSpan,
 };
-use tokio::{task::JoinHandle, time::sleep_until};
+use compio::{runtime::JoinHandle, time::sleep_until};
 
 use crate::{net::PacketSocket, watch, SocketStatistics, SrtSocket};
 
@@ -67,7 +67,7 @@ impl SrtSocketState {
                     local_sockid,
                     TimeSpan::from_interval(timeout, now),
                 );
-                sleep_until(timeout.into()).await
+                sleep_until(timeout).await
             };
 
             let input = select! {
@@ -125,7 +125,7 @@ impl SrtSocketState {
                 Action::WaitForData(wait) => {
                     let timeout = now + wait;
                     select! {
-                        _ = sleep_until(timeout.into()).fuse() => Input::Timer,
+                        _ = sleep_until(timeout).fuse() => Input::Timer,
                         packet = socket.receive().fuse() =>
                             Input::Packet(packet),
                         res = input_data.next() => {
@@ -155,7 +155,7 @@ impl SrtSocketFactory {
             output_data_receiver: self.output_data_receiver.peekable(),
             input_data_sender: self.input_data_sender,
             statistics_receiver: self.statistics_receiver,
-            task,
+            task: Some(task),
         }
     }
 }
@@ -183,7 +183,7 @@ impl SrtSocketTaskFactory {
             input_data_receiver: self.input_data_receiver,
         };
 
-        let handle = tokio::spawn(async move { state.run_loop().await });
+        let handle = compio::runtime::spawn(async move { state.run_loop().await });
 
         (handle, settings)
     }

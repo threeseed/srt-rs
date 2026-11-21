@@ -1,6 +1,6 @@
 use std::{convert::TryInto, io, time::Duration};
 
-use tokio::net::UdpSocket;
+use compio::net::UdpSocket;
 
 use crate::options::*;
 
@@ -16,9 +16,9 @@ pub struct SrtListenerBuilder(SocketOptions, Option<UdpSocket>);
 /// # Examples:
 /// Simple:
 /// ```
-/// # use srt_tokio::{SrtListener, options::*};
+/// # use srt_compio::{SrtListener, options::*};
 /// # use std::{io, time::Duration};
-/// # #[tokio::main]
+/// # #[compio::main]
 /// # async fn main() -> Result<(), io::Error> {
 /// let listener = SrtListener::builder()
 ///         .set(|options| {
@@ -32,7 +32,7 @@ pub struct SrtListenerBuilder(SocketOptions, Option<UdpSocket>);
 /// ```
 ///
 /// # Panics:
-/// * There is no tokio runtime
+/// * There is no compio runtime
 impl SrtListenerBuilder {
     /// Set the latency of the connection. The more latency, the more time SRT has to recover lost packets.
     /// This sets both the send and receive latency
@@ -106,7 +106,7 @@ impl SrtListenerBuilder {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[compio::test]
     async fn bind() {
         // just a test to exercise all the builder methods to ensure they don't explode
         let socket = UdpSocket::bind("0.0.0.0:9999").await.unwrap();

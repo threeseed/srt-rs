@@ -11,7 +11,7 @@ use srt_protocol::{
     packet::*,
     settings::*,
 };
-use tokio::task::JoinHandle;
+use compio::runtime::JoinHandle;
 
 use crate::{
     net::PacketSocket,

@@ -10,7 +10,7 @@ license = "Apache-2.0"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-srt-tokio = {version = "0.4.4", path = "../srt-tokio"}
+srt-compio = { version = "0.4.4", path = "../srt-compio" }
 srt-protocol = {version = "0.4.4", path = "../srt-protocol"}
 lazy_static = "1"
 libc = "0.2"

@@ -5,7 +5,7 @@ use std::{
 
 use futures::{prelude::*, select};
 use log::{debug, info, trace, warn};
-use tokio::time::interval;
+use compio::time::interval;
 
 use srt_protocol::{
     connection::Connection,
@@ -90,7 +90,7 @@ mod test {
     use crate::SrtSocket;
     use assert_matches::assert_matches;
 
-    #[tokio::test]
+    #[compio::test]
     async fn conntimeo() {
         let _ = pretty_env_logger::try_init();
 

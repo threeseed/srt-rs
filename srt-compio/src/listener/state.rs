@@ -6,7 +6,7 @@ use std::{
 
 use futures::{channel::mpsc, future::Fuse, prelude::*, select, FutureExt, SinkExt};
 use srt_protocol::{connection::Connection, listener::*, packet::*, settings::ConnInitSettings};
-use tokio::sync::oneshot;
+use futures::channel::oneshot;
 
 use crate::{net::PacketSocket, watch};
 
@@ -53,7 +53,7 @@ impl SrtListenerState {
     pub async fn run_loop(mut self) {
         use Action::*;
         let mut input = Input::Timer;
-        let mut timer_interval = tokio::time::interval(Duration::from_millis(100));
+        let mut timer_interval = compio::time::interval(Duration::from_millis(100));
         let start = Instant::now();
         let elapsed = |now: Instant| TimeSpan::from_interval(start, now);
         loop {

@@ -5,7 +5,7 @@ documentation = "https://docs.rs/srt-rs"
 edition = "2021"
 homepage = "https://github.com/russelltg/srt-rs"
 license = "Apache-2.0"
-name = "srt-tokio"
+name = "srt-compio"
 publish = true
 repository = "https://github.com/russelltg/srt-rs"
 version = "0.4.4"
@@ -32,15 +32,13 @@ version = "0.4"
 version = "0.4.4"
 path = "../srt-protocol"
 
-[dependencies.tokio]
-features = ["net", "time", "test-util", "macros", "io-util", "io-std", "sync"]
-version = "1"
-
-[dependencies.tokio-stream]
-features = ["sync"]
-version = "0.1"
+[dependencies.compio]
+features = ["macros", "time", "net", "runtime", "io-uring"]
+default-features = false
+version = "0.19.2"
 
 [dev-dependencies]
+futures = { version = "0.3", features = ["executor"] }
 anyhow = "1"
 lazy_static = "1"
 libc = "0.2"
@@ -52,14 +50,6 @@ assert_matches = "1.0.0"
 [dev-dependencies.pretty_env_logger]
 default-features = false
 version = "0.5"
-
-[dev-dependencies.tokio]
-features = ["rt-multi-thread"]
-version = "1"
-
-[dev-dependencies.tokio-util]
-features = ["net", "codec"]
-version = "0.7"
 
 [features]
 default = []

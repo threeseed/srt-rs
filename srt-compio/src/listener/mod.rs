@@ -2,11 +2,14 @@ mod builder;
 mod session;
 mod state;
 
-use std::{io, sync::Arc};
+use std::io;
 
-use futures::{channel::mpsc, prelude::*};
+use compio::{net::UdpSocket, runtime::JoinHandle};
+use futures::{
+    channel::{mpsc, oneshot},
+    prelude::*,
+};
 use srt_protocol::settings::ConnInitSettings;
-use tokio::{net::UdpSocket, sync::oneshot, task::JoinHandle};
 
 use crate::net::bind_socket;
 
@@ -21,7 +24,7 @@ pub struct SrtListener {
     settings: ConnInitSettings,
     statistics_receiver: watch::Receiver<ListenerStatistics>,
     close_req: Option<oneshot::Sender<()>>,
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug)]
@@ -46,7 +49,7 @@ impl SrtListener {
         use state::SrtListenerState;
         let socket_options = options.into_value().socket;
         let local_address = socket.local_addr()?;
-        let socket = PacketSocket::from_socket(Arc::new(socket), 1024 * 1024);
+        let socket = PacketSocket::from_socket(socket, 1024 * 1024);
         let settings = ConnInitSettings::from(socket_options);
         let (close_req, close_resp) = oneshot::channel();
         let (request_sender, request_receiver) = mpsc::channel(100);
@@ -59,7 +62,7 @@ impl SrtListener {
             statistics_sender,
             close_resp,
         );
-        let task = tokio::spawn(async move {
+        let task = compio::runtime::spawn(async move {
             state.run_loop().await;
         });
         Ok((
@@ -67,7 +70,7 @@ impl SrtListener {
                 settings,
                 statistics_receiver,
                 close_req: Some(close_req),
-                task,
+                task: Some(task),
             },
             SrtIncoming { request_receiver },
         ))
@@ -82,8 +85,12 @@ impl SrtListener {
     }
 
     pub async fn close(&mut self) {
-        let _ = self.close_req.take().unwrap().send(());
-        (&mut self.task).await.unwrap();
+        if let Some(close_req) = self.close_req.take() {
+            let _ = close_req.send(());
+        }
+        if let Some(task) = self.task.take() {
+            task.await.unwrap();
+        }
     }
 }
 
@@ -95,7 +102,10 @@ impl SrtIncoming {
 
 impl Drop for SrtListener {
     fn drop(&mut self) {
-        // TODO: we probably need to use a std::sync primitive to block until closed
+        // keep the listener running in the background, matching the previous detached semantics
+        if let Some(task) = self.task.take() {
+            task.detach();
+        }
     }
 }
 
@@ -112,7 +122,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[compio::test]
     async fn accept_reject() -> Result<()> {
         #[derive(Debug)]
         enum Select {
@@ -125,7 +135,7 @@ mod tests {
 
         let (finished_send, finished_recv) = oneshot::channel();
 
-        let listener = tokio::spawn(async {
+        let listener = compio::runtime::spawn(async {
             let (mut server, mut incoming) =
                 SrtListener::builder().bind("127.0.0.1:4001").await.unwrap();
             let mut statistics = server.statistics().clone().fuse();
@@ -148,11 +158,12 @@ mod tests {
                             let mut stream = stream::iter(
                                 Some(Ok((Instant::now(), Bytes::from("hello")))).into_iter(),
                             );
-                            tokio::spawn(async move {
+                            compio::runtime::spawn(async move {
                                 sender.send_all(&mut stream).await.unwrap();
                                 sender.close().await.unwrap();
                                 info!("Sent");
-                            });
+                            })
+                            .detach();
                         }
                     }
                     Select::Statistics(Some(stats)) => debug!("{:?}", stats),
@@ -166,7 +177,7 @@ mod tests {
         // connect 10 clients to it
         let mut join_handles = vec![];
         for i in 0..10 {
-            join_handles.push(tokio::spawn(async move {
+            join_handles.push(compio::runtime::spawn(async move {
                 info!("Calling: {}", i);
                 let address = "127.0.0.1:4001";
                 if i % 2 > 0 {
@@ -193,11 +204,11 @@ mod tests {
         join_all(join_handles).await;
         info!("all finished");
         finished_send.send(()).unwrap();
-        listener.await?;
+        listener.await.expect("listener task");
         Ok(())
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn accept_reject_encryption() -> Result<()> {
         #[derive(Debug)]
         enum Select {
@@ -210,7 +221,7 @@ mod tests {
 
         let (finished_send, finished_recv) = oneshot::channel();
 
-        let listener = tokio::spawn(async {
+        let listener = compio::runtime::spawn(async {
             let (mut server, mut incoming) = SrtListener::builder()
                 .encryption(0, "super secret passcode")
                 .bind("127.0.0.1:4002")
@@ -239,11 +250,12 @@ mod tests {
                             let mut stream = stream::iter(
                                 Some(Ok((Instant::now(), Bytes::from("hello")))).into_iter(),
                             );
-                            tokio::spawn(async move {
+                            compio::runtime::spawn(async move {
                                 sender.send_all(&mut stream).await.expect("send_all");
                                 sender.close().await.expect("close");
                                 info!("Sent");
-                            });
+                            })
+                            .detach();
                         }
                     }
                     Select::Statistics(Some(stats)) => debug!("{:?}", stats),
@@ -257,7 +269,7 @@ mod tests {
         // connect 10 clients to it
         let mut join_handles = vec![];
         for i in 0..10 {
-            join_handles.push(tokio::spawn(async move {
+            join_handles.push(compio::runtime::spawn(async move {
                 info!("Calling: {}", i);
                 let address = "127.0.0.1:4002";
                 if i % 2 == 0 {
@@ -285,16 +297,16 @@ mod tests {
         join_all(join_handles).await;
         info!("all finished");
         finished_send.send(()).unwrap();
-        listener.await?;
+        listener.await.expect("listener task");
         Ok(())
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn multiplex_timeout() {
         use bytes::Bytes;
         use futures::{stream, SinkExt, StreamExt};
         use log::info;
-        use tokio::time::sleep;
+        use compio::time::sleep;
 
         use srt_protocol::options::*;
 
@@ -315,7 +327,7 @@ mod tests {
             while let Some(request) = incoming.incoming().next().await {
                 let mut srt_socket = request.accept(None).await.unwrap();
 
-                tokio::spawn(async move {
+                compio::runtime::spawn(async move {
                     let client_desc = format!(
                         "(ip_port: {}, sockid: {})",
                         srt_socket.settings().remote,
@@ -334,7 +346,7 @@ mod tests {
                         }
                         Some((res, count))
                     })
-                    .boxed();
+                    .boxed_local();
 
                     if let Err(e) = srt_socket.send_all(&mut stream).await {
                         info!("Send to client: {} error: {:?}", client_desc, e);
@@ -342,7 +354,8 @@ mod tests {
                     info!("Client {} disconnected", client_desc);
 
                     start.elapsed().as_secs() as i32
-                });
+                })
+                .detach();
             }
             Ok(())
         }
@@ -374,11 +387,11 @@ mod tests {
             Ok(start.elapsed().as_secs() as i32)
         }
 
-        let _listener_handle = tokio::spawn(run_listener());
+        let _listener_handle = compio::runtime::spawn(run_listener());
         let join_handles = [
-            tokio::spawn(run_receiver(1)),
-            tokio::spawn(run_receiver(2)),
-            tokio::spawn(run_receiver(3)),
+            compio::runtime::spawn(run_receiver(1)),
+            compio::runtime::spawn(run_receiver(2)),
+            compio::runtime::spawn(run_receiver(3)),
         ];
         let min_elapsed_seconds = join_all(join_handles)
             .await

@@ -5,7 +5,7 @@ use std::{
 
 use futures::{prelude::*, select};
 use log::{debug, warn};
-use tokio::time::interval;
+use compio::time::interval;
 
 use srt_protocol::{
     connection::Connection,

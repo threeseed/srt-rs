@@ -9,7 +9,6 @@ use std::{
     fmt::Debug,
     io,
     pin::Pin,
-    sync::Arc,
     task::{Context, Poll},
     time::Instant,
 };
@@ -25,7 +24,7 @@ use srt_protocol::{
     connection::ConnectionSettings,
     options::{OptionsError, OptionsOf, SocketOptions, Validation},
 };
-use tokio::{net::UdpSocket, task::JoinHandle};
+use compio::{net::UdpSocket, runtime::JoinHandle};
 
 use super::{net::*, options::BindOptions, watch};
 
@@ -45,7 +44,7 @@ pub struct SrtSocket {
     input_data_sender: mpsc::Sender<(Instant, Bytes)>,
     statistics_receiver: watch::Receiver<SocketStatistics>,
     settings: ConnectionSettings,
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
 }
 
 impl SrtSocket {
@@ -79,7 +78,7 @@ impl SrtSocket {
     }
 
     async fn bind_with_socket(options: BindOptions, socket: UdpSocket) -> Result<Self, io::Error> {
-        let socket = PacketSocket::from_socket(Arc::new(socket), 1024 * 1024);
+        let socket = PacketSocket::from_socket(socket, 1024 * 1024);
 
         use BindOptions::*;
         let (socket, connection) = match options {
@@ -97,7 +96,10 @@ impl SrtSocket {
 
     pub async fn close_and_finish(&mut self) -> Result<(), io::Error> {
         self.close().await?;
-        (&mut self.task).await?;
+        if let Some(task) = self.task.take() {
+            task.await
+                .map_err(|e| io::Error::other(format!("socket task failed: {e:?}")))?;
+        }
         Ok(())
     }
 
@@ -121,6 +123,15 @@ impl SrtSocket {
 
     pub fn statistics(&mut self) -> &mut (impl Stream<Item = SocketStatistics> + Clone) {
         &mut self.statistics_receiver
+    }
+}
+
+impl Drop for SrtSocket {
+    fn drop(&mut self) {
+        // keep the connection task running so it can shut down gracefully
+        if let Some(task) = self.task.take() {
+            task.detach();
+        }
     }
 }
 

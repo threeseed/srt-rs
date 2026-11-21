@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::{convert::TryInto, io, net::IpAddr, time::Duration};
 
-use tokio::net::UdpSocket;
+use compio::net::UdpSocket;
 
 use crate::options::*;
 
@@ -17,9 +17,9 @@ pub struct SrtSocketBuilder(SocketOptions, Option<UdpSocket>);
 /// # Examples:
 /// Simple:
 /// ```
-/// # use srt_tokio::{SrtSocket, options::*};
+/// # use srt_compio::{SrtSocket, options::*};
 /// # use std::io;
-/// # #[tokio::main]
+/// # #[compio::main]
 /// # async fn main() -> Result<(), io::Error> {
 /// let (a, b) = futures::try_join!(
 ///     SrtSocket::builder().listen_on(":3333"),
@@ -32,9 +32,9 @@ pub struct SrtSocketBuilder(SocketOptions, Option<UdpSocket>);
 /// Rendezvous example:
 ///
 /// ```
-/// # use srt_tokio::{SrtSocket, options::*};
+/// # use srt_compio::{SrtSocket, options::*};
 /// # use std::{io, time::Duration};///
-/// # #[tokio::main]
+/// # #[compio::main]
 /// # async fn main() -> Result<(), io::Error> {
 /// let (a, b) = futures::try_join!(
 ///     SrtSocket::builder().local_port(5555).rendezvous("127.0.0.1:4444"),
@@ -53,7 +53,7 @@ pub struct SrtSocketBuilder(SocketOptions, Option<UdpSocket>);
 /// ```
 ///
 /// # Panics:
-/// * There is no tokio runtime
+/// * There is no compio runtime
 impl SrtSocketBuilder {
     /// Sets the local address of the socket. This can be used to bind to just a specific network adapter instead of the default of all adapters.
     pub fn local_ip(mut self, ip: IpAddr) -> Self {

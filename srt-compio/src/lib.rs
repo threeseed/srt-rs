@@ -7,13 +7,13 @@
 //!
 //! # Quick start
 //! ```rust
-//! use srt_tokio::SrtSocket;
+//! use srt_compio::SrtSocket;
 //! use futures::prelude::*;
 //! use bytes::Bytes;
 //! use std::time::Instant;
 //! use std::io;
 //!
-//! #[tokio::main]
+//! #[compio::main]
 //! async fn main()
 //!# // keep this to quell `needless_doctest_main` warning
 //!# -> ()
