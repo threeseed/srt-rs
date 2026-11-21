@@ -2,19 +2,15 @@ use std::env;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use tokio::net::UdpSocket;
-use tokio::process::{Child, Command};
-use tokio::time::sleep;
-use tokio_util::codec::{BytesCodec, Decoder};
-use tokio_util::udp::UdpFramed;
+use compio::buf::BufResult;
+use compio::net::UdpSocket;
+use compio::time::{sleep, timeout};
 
 use anyhow::Error;
-
-use futures::{stream, FutureExt, SinkExt, StreamExt, TryStreamExt};
 
 use pretty_assertions::assert_eq;
 
@@ -45,37 +41,38 @@ fn find_stransmit_rs() -> PathBuf {
     stransmit_rs_path
 }
 
-struct ChunkDecoder {
+// UDP socket that yields received data split into fixed-size chunks
+struct ChunkReceiver {
+    sock: UdpSocket,
     size: usize,
+    pending: BytesMut,
+    buf: Vec<u8>,
 }
 
-impl ChunkDecoder {
-    pub fn new(size: usize) -> Self {
-        ChunkDecoder { size }
-    }
-}
-
-impl Decoder for ChunkDecoder {
-    type Item = BytesMut;
-    type Error = std::io::Error;
-
-    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<BytesMut>, std::io::Error> {
-        if buf.len() >= self.size {
-            let out = buf.split_to(self.size);
-            buf.reserve(self.size);
-            Ok(Some(out))
-        } else {
-            Ok(None)
+impl ChunkReceiver {
+    async fn next_chunk(&mut self) -> Result<BytesMut, Error> {
+        loop {
+            if self.pending.len() >= self.size {
+                return Ok(self.pending.split_to(self.size));
+            }
+            let mut buf = std::mem::take(&mut self.buf);
+            buf.clear();
+            let BufResult(res, buf) = self.sock.recv_from(buf).await;
+            res?;
+            self.pending.extend_from_slice(&buf);
+            self.buf = buf;
         }
     }
 }
 
-async fn build_receiver_socket(udp_out: u16, ident: i32) -> Result<UdpFramed<ChunkDecoder>, Error> {
+async fn build_receiver_socket(udp_out: u16, ident: i32) -> Result<ChunkReceiver, Error> {
     let len = format!("asdf{ident}").len();
-    Ok(UdpFramed::new(
-        UdpSocket::bind(&SocketAddr::new("127.0.0.1".parse()?, udp_out)).await?,
-        ChunkDecoder::new(len),
-    ))
+    Ok(ChunkReceiver {
+        sock: UdpSocket::bind(SocketAddr::new("127.0.0.1".parse()?, udp_out)).await?,
+        size: len,
+        pending: BytesMut::new(),
+        buf: Vec::with_capacity(65536),
+    })
 }
 
 async fn udp_receiver(udp_out: u16, ident: i32) -> Result<(), Error> {
@@ -83,10 +80,11 @@ async fn udp_receiver(udp_out: u16, ident: i32) -> Result<(), Error> {
     udp_receiver_sock(&mut sock, ident).await
 }
 
-async fn udp_receiver_sock(sock: &mut UdpFramed<ChunkDecoder>, ident: i32) -> Result<(), Error> {
+async fn udp_receiver_sock(sock: &mut ChunkReceiver, ident: i32) -> Result<(), Error> {
     let receive_data = async move {
         let mut i = 0;
-        while let Some((pack, _)) = sock.try_next().await.unwrap() {
+        loop {
+            let pack = sock.next_chunk().await.unwrap();
             assert_eq!(&pack, &format!("asdf{ident}"));
 
             // once we get 20, that's good enough for validity
@@ -97,37 +95,42 @@ async fn udp_receiver_sock(sock: &mut UdpFramed<ChunkDecoder>, ident: i32) -> Re
         }
     };
     // 10s timeout
-    let succ = futures::select!(_ = receive_data.boxed().fuse() => true, _ = sleep(Duration::from_secs(10)).fuse() => false);
+    let succ = timeout(Duration::from_secs(10), receive_data).await.is_ok();
     assert!(succ, "Timeout with receiving");
 
     Ok::<_, Error>(())
 }
 
 async fn udp_sender(udp_in: u16, ident: i32) -> Result<(), Error> {
-    let mut sock = UdpFramed::new(UdpSocket::bind("127.0.0.1:0").await?, BytesCodec::new());
-    let mut stream =
-        tokio_stream::StreamExt::throttle(stream::iter(0..100), Duration::from_millis(100))
-            .map(|_| {
-                Ok((
-                    Bytes::from(format!("asdf{ident}")),
-                    SocketAddr::new("127.0.0.1".parse().unwrap(), udp_in),
-                ))
-            })
-            .boxed();
-    sock.send_all(&mut stream).await.unwrap();
+    let sock = UdpSocket::bind("127.0.0.1:0").await?;
+    let target = SocketAddr::new("127.0.0.1".parse().unwrap(), udp_in);
+    // send 100 packets, throttled to one every 100ms
+    for i in 0..100 {
+        if i != 0 {
+            sleep(Duration::from_millis(100)).await;
+        }
+        let BufResult(res, _) = sock
+            .send_to(Bytes::from(format!("asdf{ident}")), target)
+            .await;
+        res.unwrap();
+    }
 
     Ok::<_, Error>(())
 }
 
+// wait for either process to exit, or kill both after 10s
 async fn wait_for(mut a: Child, mut b: Child, failure_str: &str) -> Result<(), Error> {
-    futures::select! {
-        r_a = a.wait().fuse() => { r_a.expect(failure_str); },
-        r_b = b.wait().fuse() => { r_b.expect(failure_str); },
-        _ = sleep(Duration::from_secs(10)).fuse() => {
-            a.kill().await.expect(failure_str);
-            b.kill().await.expect(failure_str);
+    for _ in 0..1000 {
+        if a.try_wait().expect(failure_str).is_some() || b.try_wait().expect(failure_str).is_some()
+        {
+            return Ok(());
         }
+        sleep(Duration::from_millis(10)).await;
     }
+    a.kill().expect(failure_str);
+    b.kill().expect(failure_str);
+    a.wait().expect(failure_str);
+    b.wait().expect(failure_str);
 
     Ok::<_, Error>(())
 }
@@ -191,9 +194,9 @@ mod stransmit_rs_snd_rcv {
     use super::test_send;
     use crate::{build_receiver_socket, find_stransmit_rs, udp_receiver_sock, udp_sender};
     use anyhow::Error;
-    use tokio::process::Command;
+    use std::process::Command;
 
-    #[tokio::test]
+    #[compio::test]
     async fn basic() -> Result<(), Error> {
         test_send(
             2900,
@@ -207,7 +210,7 @@ mod stransmit_rs_snd_rcv {
     // Windows CI doesn't seem to like these tests, but it passes on non-ci machines.
     // The hope is if there's a regression, it'll show up in linux or macos.
     #[cfg(not(target_os = "windows"))]
-    #[tokio::test]
+    #[compio::test]
     async fn basic_tcp() -> Result<(), Error> {
         test_send(
             3000,
@@ -218,7 +221,7 @@ mod stransmit_rs_snd_rcv {
         .await
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn sender_as_listener() -> Result<(), Error> {
         test_send(
             2003,
@@ -230,7 +233,7 @@ mod stransmit_rs_snd_rcv {
     }
 
     #[cfg(not(target_os = "windows"))]
-    #[tokio::test]
+    #[compio::test]
     async fn sender_as_listener_tcp() -> Result<(), Error> {
         test_send(
             3003,
@@ -241,7 +244,7 @@ mod stransmit_rs_snd_rcv {
         .await
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn sender_as_listener_srt_local_port() -> Result<(), Error> {
         test_send(
             2006,
@@ -255,7 +258,7 @@ mod stransmit_rs_snd_rcv {
         .await
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn rendezvous() -> Result<(), Error> {
         test_send(
             3010,
@@ -272,7 +275,7 @@ mod stransmit_rs_snd_rcv {
         .await
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn stransmit_rs_rendezvous_udp_local_port() -> Result<(), Error> {
         test_send(
             2014,
@@ -289,7 +292,7 @@ mod stransmit_rs_snd_rcv {
         .await
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn latency() -> Result<(), Error> {
         test_send(
             2019,
@@ -303,7 +306,7 @@ mod stransmit_rs_snd_rcv {
         .await
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn udp_to_udp() -> Result<(), Error> {
         test_send(
             2022,
@@ -314,7 +317,7 @@ mod stransmit_rs_snd_rcv {
         .await
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn multiplex() -> Result<(), Error> {
         test_send(
             2025,
@@ -325,7 +328,7 @@ mod stransmit_rs_snd_rcv {
         .await
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn encryption() -> Result<(), Error> {
         test_send(
             2028,
@@ -339,7 +342,7 @@ mod stransmit_rs_snd_rcv {
         .await
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn encryption_pbkeylen() -> Result<(), Error> {
         test_send(
             2031,
@@ -356,7 +359,7 @@ mod stransmit_rs_snd_rcv {
         .await
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn parse_hostname() -> Result<(), Error> {
         test_send(
             2034,
@@ -367,7 +370,7 @@ mod stransmit_rs_snd_rcv {
         .await
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn ipv6() -> Result<(), Error> {
         test_send(
             3034,
@@ -378,7 +381,7 @@ mod stransmit_rs_snd_rcv {
         .await
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn reconnect() -> Result<(), Error> {
         let srs_path = find_stransmit_rs();
 
@@ -388,11 +391,11 @@ mod stransmit_rs_snd_rcv {
             .unwrap();
 
         let b_args = &["srt://:2038", "udp://127.0.0.1:2039"];
-        let mut b = Command::new(&srs_path).args(b_args).spawn()?;
+        let mut b = Command::new(&srs_path).args(b_args).spawn().unwrap();
 
         let ident: i32 = rand::random();
 
-        let mut recv_sock = build_receiver_socket(2039, ident).await?;
+        let mut recv_sock = build_receiver_socket(2039, ident).await.unwrap();
 
         let sender = udp_sender(2037, ident);
         let recvr = udp_receiver_sock(&mut recv_sock, ident);
@@ -402,8 +405,8 @@ mod stransmit_rs_snd_rcv {
         let failure_str = "Failed reconnect test";
 
         // it worked, restart b, send again
-        b.kill().await.expect(failure_str);
-        b.wait().await.expect(failure_str);
+        b.kill().expect(failure_str);
+        b.wait().expect(failure_str);
 
         let mut b = Command::new(&srs_path).args(b_args).spawn().unwrap();
 
@@ -412,11 +415,11 @@ mod stransmit_rs_snd_rcv {
 
         futures::try_join!(recvr, sender).unwrap();
 
-        a.kill().await.expect(failure_str);
-        b.kill().await.expect(failure_str);
+        a.kill().expect(failure_str);
+        b.kill().expect(failure_str);
 
-        a.wait().await.expect(failure_str);
-        b.wait().await.expect(failure_str);
+        a.wait().expect(failure_str);
+        b.wait().expect(failure_str);
 
         Ok(())
     }

@@ -1,14 +1,20 @@
-use std::{env, path::PathBuf, process::Stdio, time::Instant};
-
-use bytes::Bytes;
-use futures::prelude::*;
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::Command,
-    time::{sleep, Duration},
+use std::{
+    env,
+    path::PathBuf,
+    process::Stdio,
+    time::{Duration, Instant},
 };
 
-use srt_tokio::SrtSocket;
+use bytes::Bytes;
+use compio::{
+    buf::BufResult,
+    io::{AsyncRead, AsyncWriteExt},
+    process::Command,
+    time::sleep,
+};
+use futures::prelude::*;
+
+use srt_compio::SrtSocket;
 
 #[cfg(target_os = "windows")]
 const STRANSMIT_NAME: &str = "srt-transmit.exe";
@@ -35,7 +41,7 @@ fn find_stransmit_rs() -> PathBuf {
     stransmit_rs_path
 }
 
-#[tokio::test]
+#[compio::test]
 async fn receiver_timeout() {
     let _ = pretty_env_logger::try_init();
 
@@ -45,14 +51,17 @@ async fn receiver_timeout() {
     let mut a = Command::new(&stranmsit_rs)
         .args(["-", "srt://:1878"])
         .stdin(Stdio::piped())
+        .unwrap()
         .spawn()
         .unwrap();
 
     let sender = async move {
-        a.stdin.as_mut().unwrap().write_all(b"asdf").await.unwrap();
+        let BufResult(res, _) = a.stdin.as_mut().unwrap().write_all(b"asdf").await;
+        res.unwrap();
         sleep(Duration::from_millis(2000)).await;
 
-        a.kill().await.unwrap();
+        a.kill().unwrap();
+        a.wait().await.unwrap();
     };
 
     let recvr = async move {
@@ -66,7 +75,7 @@ async fn receiver_timeout() {
     futures::join!(sender, recvr);
 }
 
-#[tokio::test]
+#[compio::test]
 async fn sender_timeout() {
     let _ = pretty_env_logger::try_init();
 
@@ -76,6 +85,7 @@ async fn sender_timeout() {
     let mut a = Command::new(&stranmsit_rs)
         .args(["srt://localhost:1879", "-"])
         .stdout(Stdio::piped())
+        .unwrap()
         .spawn()
         .unwrap();
 
@@ -97,14 +107,23 @@ async fn sender_timeout() {
     };
 
     let recvr = async move {
-        let mut out = BufReader::new(a.stdout.as_mut().unwrap());
+        let mut out = a.stdout.take().unwrap();
 
-        let mut line = String::new();
-        for _ in 0..10 {
-            out.read_line(&mut line).await.unwrap();
+        // read 10 lines
+        let mut lines = 0;
+        let mut buf = Vec::with_capacity(1024);
+        while lines < 10 {
+            buf.clear();
+            let BufResult(res, b) = out.read(buf).await;
+            buf = b;
+            if res.unwrap() == 0 {
+                break;
+            }
+            lines += buf.iter().filter(|c| **c == b'\n').count();
         }
 
-        a.kill().await.unwrap();
+        a.kill().unwrap();
+        a.wait().await.unwrap();
     };
     futures::join!(sender, recvr);
 }

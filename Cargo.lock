@@ -40,18 +40,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ahash"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d713b3834d76b85304d4d525563c1276e2e30dc97cc67bfb4585a4a29fc2c89f"
-dependencies = [
- "cfg-if",
- "once_cell",
- "version_check",
- "zerocopy",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -59,12 +47,6 @@ checksum = "b2969dcb958b36655471fc61f7e416fa76033bdd4bfed0678d8fee1e2d07a1f0"
 dependencies = [
  "memchr",
 ]
-
-[[package]]
-name = "allocator-api2"
-version = "0.2.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0942ffc6dcaadf03badf6e6a2d0228460359d5e34b57ccdc720b7382dfbd5ec5"
 
 [[package]]
 name = "anstream"
@@ -382,10 +364,12 @@ checksum = "c19d81c636b0f47aa50041d25b02d9d8289a3319727a8051209f71bea10e89d6"
 dependencies = [
  "compio-buf",
  "compio-driver",
+ "compio-fs",
  "compio-io",
  "compio-log",
  "compio-macros",
  "compio-net",
+ "compio-process",
  "compio-runtime",
 ]
 
@@ -440,6 +424,25 @@ dependencies = [
  "crossbeam-queue",
  "loom",
  "slotmap",
+]
+
+[[package]]
+name = "compio-fs"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a374c5a03bdf7ecb42894a49c3a40c22f743f8d7dc39cc21a5dd3258d8219c7"
+dependencies = [
+ "cfg_aliases",
+ "compio-buf",
+ "compio-driver",
+ "compio-io",
+ "compio-runtime",
+ "futures-util",
+ "libc",
+ "pin-project-lite",
+ "rustix 1.1.6",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -498,6 +501,20 @@ dependencies = [
  "socket2 0.6.5",
  "synchrony",
  "widestring",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "compio-process"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9458c4e8bb00eef7094de2d189e2c4e1b407a05efe46e9fa7a7ac4042cf31983"
+dependencies = [
+ "compio-buf",
+ "compio-driver",
+ "compio-io",
+ "compio-runtime",
+ "futures-util",
  "windows-sys 0.61.2",
 ]
 
@@ -981,16 +998,6 @@ name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
-
-[[package]]
-name = "hashbrown"
-version = "0.14.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "290f1a1d9242c78d09ce40a5e87e7554ee637af1351968159f4952f028f75604"
-dependencies = [
- "ahash",
- "allocator-api2",
-]
 
 [[package]]
 name = "hashbrown"
@@ -1890,15 +1897,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "signal-hook-registry"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8229b473baa5980ac72ef434c4415e70c4b5e71b423043adb4ba059f89c99a1"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "slab"
 version = "0.4.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2039,6 +2037,7 @@ dependencies = [
  "bus",
  "bytes",
  "clap",
+ "compio",
  "console-subscriber 0.1.10",
  "futures",
  "log",
@@ -2046,9 +2045,6 @@ dependencies = [
  "pretty_env_logger",
  "rand",
  "srt-compio",
- "tokio",
- "tokio-stream",
- "tokio-util",
  "url",
 ]
 
@@ -2217,7 +2213,6 @@ dependencies = [
  "mio",
  "num_cpus",
  "pin-project-lite",
- "signal-hook-registry",
  "socket2 0.5.6",
  "tokio-macros",
  "tracing",
@@ -2264,12 +2259,8 @@ checksum = "5419f34732d9eb6ee4c3578b7989078579b7f039cbbb9ca2c4da015749371e15"
 dependencies = [
  "bytes",
  "futures-core",
- "futures-io",
  "futures-sink",
- "futures-util",
- "hashbrown 0.14.3",
  "pin-project-lite",
- "slab",
  "tokio",
  "tracing",
 ]
@@ -2801,23 +2792,3 @@ name = "yansi"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09041cd90cf85f7f8b2df60c646f853b7f535ce68f85244eb6731cf89fa498ec"
-
-[[package]]
-name = "zerocopy"
-version = "0.7.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74d4d3961e53fa4c9a25a8637fc2bfaf2595b3d3ae34875568a5cf64787716be"
-dependencies = [
- "zerocopy-derive",
-]
-
-[[package]]
-name = "zerocopy-derive"
-version = "0.7.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ce1b18ccd8e73a9321186f97e46f9f04b778851177567b1975109d26a08d2a6"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.50",
-]
