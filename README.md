@@ -32,8 +32,8 @@ Reference implementation is available at https://github.com/haivision/srt
 
 The reference implementation of SRT requires 3 threads per sender and 5 threads per receiver. 
 
-With srt-rs, you can assign as many connections to exactly as many threads as you want (usually as many as you have cores) using
-[tokio's][tokio] futures scheduling. This should allow for handing of many more connections.
+With srt-rs, many connections can be driven from a single thread using
+[compio's][compio] completion-based (io_uring/IOCP) async runtime; run one runtime per core to scale out. This should allow for handing of many more connections.
 
 # Examples
 
@@ -52,12 +52,12 @@ cargo run --example receiver
 # Structure
 
 This repository is structured into 5 crates:
-* `srt-protocol`: State machines for the SRT protocol, with no dependencies on futures or tokio. Someday, I would like this to be a no-std crate. I expect this to have frequent breaking changes.
-* `srt-tokio`: Tokio elements written on top of the protocol, expected to be a relatively stable API.
+* `srt-protocol`: State machines for the SRT protocol, with no dependencies on futures or an async runtime. Someday, I would like this to be a no-std crate. I expect this to have frequent breaking changes.
+* `srt-compio`: [compio][compio] elements written on top of the protocol, expected to be a relatively stable API.
 * `srt-transmit`: A srt-live-tranmsit replacement written ontop of `srt-tokio`
 * `srt-c`: Experimental C bindings to this crate, intended to be both API and ABI compatiable with the reference implementation
 * `srt-c-unittests`: The unit tests from the reference implementation that are ran against `srt-c`. Many of these do not pass yet.
 
 [codecov]: https://codecov.io/gh/russelltg/srt-rs
 [codecov badge]: https://codecov.io/gh/russelltg/srt-rs/branch/main/graph/badge.svg
-[tokio]: https://tokio.rs
+[compio]: https://github.com/compio-rs/compio

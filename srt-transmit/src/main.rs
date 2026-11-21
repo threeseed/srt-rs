@@ -22,19 +22,20 @@ use futures::{
     future,
     prelude::*,
     ready,
-    stream::{self, once, unfold, BoxStream},
+    stream::{self, once, unfold, LocalBoxStream},
     try_join,
 };
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    net::TcpListener,
-    net::TcpStream,
-    net::UdpSocket,
-    spawn,
-};
-use tokio_util::{codec::BytesCodec, codec::Framed, codec::FramedWrite, udp::UdpFramed};
 
-use srt_tokio::{
+use compio::{
+    buf::BufResult,
+    fs::File,
+    io::{AsyncRead, AsyncReadAt, AsyncWrite, AsyncWriteAtExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream, UdpSocket},
+    runtime::spawn,
+    time::sleep,
+};
+
+use srt_compio::{
     options::{
         url_parse, BindOptions, CallerOptions, ListenerOptions, RendezvousOptions, SocketOptions,
     },
@@ -47,9 +48,9 @@ const AFTER_HELPTEXT: &str = include_str!("helptext.txt");
 
 // boxed() combinator for sink, which somehow doesn't exist
 trait MySinkExt<Item>: Sink<Item> {
-    fn boxed_sink<'a>(self) -> Pin<Box<dyn Sink<Item, Error = Self::Error> + 'a + Send>>
+    fn boxed_sink<'a>(self) -> Pin<Box<dyn Sink<Item, Error = Self::Error> + 'a>>
     where
-        Self: Sized + Send + 'a,
+        Self: Sized + 'a,
     {
         Box::pin(self)
     }
@@ -62,16 +63,83 @@ enum DataType<'a> {
     File(&'a Path),
 }
 
-fn read_to_stream(read: impl AsyncRead + Unpin) -> impl Stream<Item = Result<Bytes, Error>> {
-    stream::unfold(read, |mut source| async move {
-        let mut buf = [0; 1316];
-        let bytes_read = match source.read(&mut buf[..]).await {
-            Ok(0) => return None,
-            Ok(bytes_read) => bytes_read,
-            Err(e) => return Some((Err(Error::from(e)), source)),
-        };
+const READ_CHUNK: usize = 1316;
 
-        Some((Ok(Bytes::copy_from_slice(&buf[..bytes_read])), source))
+// The streams below own their reader and buffer, so an in-flight read is never dropped
+// (dropping an in-flight completion-based read would lose its data).
+fn read_to_stream(read: impl AsyncRead + 'static) -> impl Stream<Item = Result<Bytes, Error>> {
+    stream::unfold(
+        Some((read, Vec::with_capacity(READ_CHUNK))),
+        |state| async move {
+            let (mut source, mut buf) = state?;
+            buf.clear();
+            let BufResult(res, buf) = source.read(buf).await;
+            match res {
+                Ok(0) => None,
+                Ok(_) => Some((Ok(Bytes::copy_from_slice(&buf)), Some((source, buf)))),
+                Err(e) => Some((Err(Error::from(e)), None)),
+            }
+        },
+    )
+}
+
+fn read_file_to_stream(file: File) -> impl Stream<Item = Result<Bytes, Error>> {
+    stream::unfold(
+        Some((file, 0u64, Vec::with_capacity(READ_CHUNK))),
+        |state| async move {
+            let (file, pos, mut buf) = state?;
+            buf.clear();
+            let BufResult(res, buf) = file.read_at(buf, pos).await;
+            match res {
+                Ok(0) => None,
+                Ok(n) => Some((
+                    Ok(Bytes::copy_from_slice(&buf)),
+                    Some((file, pos + n as u64, buf)),
+                )),
+                Err(e) => Some((Err(Error::from(e)), None)),
+            }
+        },
+    )
+}
+
+fn udp_to_stream(sock: UdpSocket) -> impl Stream<Item = Result<Bytes, Error>> {
+    stream::unfold(
+        Some((sock, Vec::with_capacity(65536))),
+        |state| async move {
+            let (sock, mut buf) = state?;
+            buf.clear();
+            let BufResult(res, buf) = sock.recv_from(buf).await;
+            match res {
+                Ok(_) => Some((Ok(Bytes::copy_from_slice(&buf)), Some((sock, buf)))),
+                Err(e) => Some((Err(Error::from(e)), None)),
+            }
+        },
+    )
+}
+
+fn write_to_sink(write: impl AsyncWrite + 'static) -> impl Sink<Bytes, Error = Error> {
+    futures::sink::unfold(write, |mut write, b: Bytes| async move {
+        let BufResult(res, _) = write.write_all(b).await;
+        res?;
+        write.flush().await?;
+        Ok(write)
+    })
+}
+
+fn file_to_sink(file: File) -> impl Sink<Bytes, Error = Error> {
+    futures::sink::unfold((file, 0u64), |(mut file, pos), b: Bytes| async move {
+        let len = b.len() as u64;
+        let BufResult(res, _) = file.write_all_at(b, pos).await;
+        res?;
+        Ok((file, pos + len))
+    })
+}
+
+fn udp_to_sink(sock: UdpSocket, addr: SocketAddr) -> impl Sink<Bytes, Error = Error> {
+    futures::sink::unfold(sock, move |sock, b: Bytes| async move {
+        let BufResult(res, _) = sock.send_to(b, addr).await;
+        res?;
+        Ok(sock)
     })
 }
 
@@ -239,7 +307,7 @@ fn parse_socket_options(
     Ok(bind_options)
 }
 
-fn parse_rendezvous(input_url: &Url) -> Option<Cow<str>> {
+fn parse_rendezvous(input_url: &Url) -> Option<Cow<'_, str>> {
     let rendezvous_v =
         input_url
             .query_pairs()
@@ -258,7 +326,8 @@ fn start_stat_task_if_requested(socket: &mut SrtSocket, url: &Url) -> Result<(),
             while let Some(s) = stat.next().await {
                 println!("{:?}", s);
             }
-        });
+        })
+        .detach();
     }
     Ok(())
 }
@@ -267,7 +336,7 @@ async fn make_srt_input(
     input_url: Url,
     input_addr: Option<SocketAddr>,
     input_local_port: u16,
-) -> Result<BoxStream<'static, Bytes>, Error> {
+) -> Result<LocalBoxStream<'static, Bytes>, Error> {
     let bind_options = parse_socket_options(&input_url, input_addr, input_local_port);
 
     // make sure multiplex was not specified
@@ -277,12 +346,12 @@ async fn make_srt_input(
 
     let mut srt_socket = SrtSocket::bind(bind_options?).await?;
     start_stat_task_if_requested(&mut srt_socket, &input_url)?;
-    Ok(srt_socket.map(Result::unwrap).map(|(_, b)| b).boxed())
+    Ok(srt_socket.map(Result::unwrap).map(|(_, b)| b).boxed_local())
 }
 
 fn resolve_input(
     input_url: DataType,
-) -> Result<BoxStream<'static, Result<BoxStream<'static, Bytes>, Error>>, Error> {
+) -> Result<LocalBoxStream<'static, Result<LocalBoxStream<'static, Bytes>, Error>>, Error> {
     Ok(match input_url {
         DataType::Url(input_url) => {
             let (input_local_port, input_addr) = local_port_addr(&input_url, "input")?;
@@ -293,19 +362,14 @@ fn resolve_input(
                      If you with to bind to a specific adapter, use the adapter setting instead."
                 ),
                 "udp" => once(async move {
-                    Ok(UdpFramed::new(
-                        UdpSocket::bind(&parse_connection_options(
-                            input_url.query_pairs(),
-                            ConnectionKind::Listen(input_local_port),
-                        )?)
-                        .await?,
-                        BytesCodec::new(),
-                    )
-                    .map(Result::unwrap)
-                    .map(|(b, _)| b.freeze())
-                    .boxed())
+                    let sock = UdpSocket::bind(parse_connection_options(
+                        input_url.query_pairs(),
+                        ConnectionKind::Listen(input_local_port),
+                    )?)
+                    .await?;
+                    Ok(udp_to_stream(sock).map(Result::unwrap).boxed_local())
                 })
-                .boxed(),
+                .boxed_local(),
                 "srt" => {
                     if input_url.query_pairs().any(|(k, _)| k == "autoreconnect") {
                         unfold(
@@ -318,9 +382,9 @@ fn resolve_input(
                                 ))
                             },
                         )
-                        .boxed()
+                        .boxed_local()
                     } else {
-                        once(make_srt_input(input_url, input_addr, input_local_port)).boxed()
+                        once(make_srt_input(input_url, input_addr, input_local_port)).boxed_local()
                     }
                 }
                 "tcp" => {
@@ -328,56 +392,52 @@ fn resolve_input(
                         once(async move {
                             loop {
                                 match TcpStream::connect(input).await {
-                                    Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                                    Err(_) => sleep(Duration::from_millis(100)).await,
                                     Ok(stream) => {
-                                        return Ok(Framed::new(stream, BytesCodec::new())
+                                        return Ok(read_to_stream(stream)
                                             .map(Result::unwrap)
-                                            .map(|b| b.freeze())
-                                            .boxed())
+                                            .boxed_local())
                                     }
                                 }
                             }
                         })
-                        .boxed()
+                        .boxed_local()
                     } else {
                         once(async move {
                             let input = &parse_connection_options(
                                 input_url.query_pairs(),
                                 ConnectionKind::Listen(input_local_port),
                             )?;
-                            let listener = TcpListener::bind(input).await?;
+                            let listener = TcpListener::bind(*input).await?;
                             let (stream, _) = listener.accept().await?;
-                            Ok(Framed::new(stream, BytesCodec::new())
-                                .map(Result::unwrap)
-                                .map(|b| b.freeze())
-                                .boxed())
+                            Ok(read_to_stream(stream).map(Result::unwrap).boxed_local())
                         })
-                        .boxed()
+                        .boxed_local()
                     }
                 }
                 s => bail!("unrecognized scheme: {} designated in input url", s),
             }
         }
         DataType::File(file) if file == Path::new("-") => once(async move {
-            Ok(read_to_stream(tokio::io::stdin())
+            Ok(read_to_stream(compio::fs::stdin())
                 .map(Result::unwrap)
-                .boxed())
+                .boxed_local())
         })
-        .boxed(),
+        .boxed_local(),
         DataType::File(file) => {
             let file = file.to_owned();
             once(async move {
-                let f = tokio::fs::File::open(file).await?;
+                let f = File::open(file).await?;
 
-                Ok(read_to_stream(f).map(Result::unwrap).boxed())
+                Ok(read_file_to_stream(f).map(Result::unwrap).boxed_local())
             })
-            .boxed()
+            .boxed_local()
         }
     })
 }
 
-type BoxSink = Pin<Box<dyn Sink<Bytes, Error = Error> + Send>>;
-type SinkStream = BoxStream<'static, Result<BoxSink, Error>>;
+type BoxSink = Pin<Box<dyn Sink<Bytes, Error = Error>>>;
+type SinkStream = LocalBoxStream<'static, Result<BoxSink, Error>>;
 
 async fn make_srt_ouput(
     output_addr: Option<SocketAddr>,
@@ -428,18 +488,14 @@ fn resolve_output(output_url: DataType) -> Result<SinkStream, Error> {
                      Example: udp://127.0.0.1:1234, not udp://:1234"
                 ),
                 "udp" => once(async move {
-                    Ok(UdpFramed::new(
-                        UdpSocket::bind(&parse_connection_options(
-                            output_url.query_pairs(),
-                            ConnectionKind::Send,
-                        )?)
-                        .await?,
-                        BytesCodec::new(),
-                    )
-                    .with(move |b| future::ready(Ok((b, output_addr.unwrap()))))
-                    .boxed_sink())
+                    let sock = UdpSocket::bind(parse_connection_options(
+                        output_url.query_pairs(),
+                        ConnectionKind::Send,
+                    )?)
+                    .await?;
+                    Ok(udp_to_sink(sock, output_addr.unwrap()).boxed_sink())
                 })
-                .boxed(),
+                .boxed_local(),
                 "srt" => {
                     if output_url.query_pairs().any(|(k, _)| k == "autoreconnect") {
                         unfold(
@@ -456,9 +512,10 @@ fn resolve_output(output_url: DataType) -> Result<SinkStream, Error> {
                                 ))
                             },
                         )
-                        .boxed()
+                        .boxed_local()
                     } else {
-                        once(make_srt_ouput(output_addr, output_url, output_local_port)).boxed()
+                        once(make_srt_ouput(output_addr, output_url, output_local_port))
+                            .boxed_local()
                     }
                 }
                 "tcp" => {
@@ -466,49 +523,38 @@ fn resolve_output(output_url: DataType) -> Result<SinkStream, Error> {
                         once(async move {
                             loop {
                                 match TcpStream::connect(output).await {
-                                    Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
-                                    Ok(stream) => {
-                                        return Ok(Framed::new(stream, BytesCodec::new())
-                                            .with(move |b| future::ready(Ok(b)))
-                                            .boxed_sink())
-                                    }
+                                    Err(_) => sleep(Duration::from_millis(100)).await,
+                                    Ok(stream) => return Ok(write_to_sink(stream).boxed_sink()),
                                 }
                             }
                         })
-                        .boxed()
+                        .boxed_local()
                     } else {
                         once(async move {
                             let output = &parse_connection_options(
                                 output_url.query_pairs(),
                                 ConnectionKind::Listen(output_local_port),
                             )?;
-                            let listener = TcpListener::bind(output).await?;
+                            let listener = TcpListener::bind(*output).await?;
                             let (stream, _) = listener.accept().await?;
-                            Ok(Framed::new(stream, BytesCodec::new())
-                                .with(move |b| future::ready(Ok(b)))
-                                .boxed_sink())
+                            Ok(write_to_sink(stream).boxed_sink())
                         })
-                        .boxed()
+                        .boxed_local()
                     }
                 }
                 s => bail!("unrecognized scheme '{}' designated in output url", s),
             }
         }
-        DataType::File(file) if file == Path::new("-") => once(async move {
-            Ok(FramedWrite::new(tokio::io::stdout(), BytesCodec::new())
-                .with(move |b| future::ready(Ok(b)))
-                .boxed_sink())
-        })
-        .boxed(),
+        DataType::File(file) if file == Path::new("-") => {
+            once(async move { Ok(write_to_sink(compio::fs::stdout()).boxed_sink()) }).boxed_local()
+        }
         DataType::File(file) => {
             let file = file.to_owned();
             once(async move {
-                let output = tokio::fs::File::create(file).await?;
-                Ok(FramedWrite::new(output, BytesCodec::new())
-                    .with(move |b| future::ready(Ok(b)))
-                    .boxed_sink())
+                let output = File::create(file).await?;
+                Ok(file_to_sink(output).boxed_sink())
             })
-            .boxed()
+            .boxed_local()
         }
     })
 }
@@ -519,7 +565,7 @@ struct MultiSinkFlatten {
 }
 
 impl MultiSinkFlatten {
-    fn new(from: impl Iterator<Item = BoxStream<'static, Result<BoxSink, Error>>>) -> Self {
+    fn new(from: impl Iterator<Item = LocalBoxStream<'static, Result<BoxSink, Error>>>) -> Self {
         MultiSinkFlatten {
             sinks: from.map(|str| (Some(str), None)).collect(),
         }
@@ -605,7 +651,7 @@ impl Sink<Bytes> for MultiSinkFlatten {
     }
 }
 
-#[tokio::main]
+#[compio::main]
 async fn main() {
     if let Err(e) = run().await {
         eprintln!("Invalid settings detected: {e}\n\nSee srt-transmit --help for more info");
@@ -625,9 +671,6 @@ async fn run() -> Result<(), Error> {
         .author("Russell Greene")
         .about("SRT sender and receiver written in rust");
 
-    #[cfg(feature = "console-subscriber")]
-    let app = app.arg(Arg::new("console").long("console"));
-
     let matches = app
         .arg(Arg::new("FROM").help("Sets the input url").required(true))
         .arg(
@@ -638,11 +681,6 @@ async fn run() -> Result<(), Error> {
         )
         .after_help(AFTER_HELPTEXT)
         .get_matches();
-
-    #[cfg(feature = "console-subscriber")]
-    if matches.is_present("console") {
-        console_subscriber::init();
-    }
 
     // these are required parameters, so unwrapping them is safe
     let from_str: &String = matches.get_one("FROM").unwrap();

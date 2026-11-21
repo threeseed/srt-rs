@@ -1,0 +1,65 @@
+use std::time::{Duration, Instant};
+
+use bytes::Bytes;
+use compio::time::sleep;
+use futures::prelude::*;
+use log::info;
+use srt_protocol::packet::TimeSpan;
+
+use srt_compio::SrtSocket;
+
+/// Send a single packet, with a large tsbpd, then close. Make sure it gets delivered with the delay.
+#[compio::test]
+async fn single_packet_tsbpd() {
+    let _ = pretty_env_logger::try_init();
+
+    let sender = SrtSocket::builder()
+        .latency(Duration::from_secs(5))
+        .call("127.0.0.1:3000", None);
+
+    let recvr = SrtSocket::builder()
+        .latency(Duration::from_secs(2))
+        .listen_on(":3000");
+
+    // init the connection
+    let (mut recvr, mut sender) = futures::try_join!(sender, recvr).unwrap();
+
+    let recvr_fut = async move {
+        let start = Instant::now();
+        let (time, packet) = recvr
+            .try_next()
+            .await
+            .unwrap()
+            .expect("The receiver should've yielded an object");
+
+        info!("Pack recvd");
+
+        // should be around 5s later
+        let delay_ms = start.elapsed().as_millis();
+        assert!(
+            delay_ms < 5500 && delay_ms > 4900,
+            "Was not around 5s later, was {delay_ms}ms"
+        );
+
+        assert_eq!(&packet, "Hello World!");
+
+        let expected_displacement = TimeSpan::from_micros(5000);
+        let displacement = TimeSpan::from_interval(start, time);
+        assert!(displacement < expected_displacement,
+            "TsbPd time calculated for the packet should be close to `start` time\nExpected: < {expected_displacement:?}\nActual: {displacement:?}\n");
+
+        // the recvr should return None now
+        assert!(recvr.next().await.is_none());
+    };
+
+    let sendr_fut = async move {
+        sender
+            .send((Instant::now(), Bytes::from("Hello World!")))
+            .await
+            .unwrap();
+        sleep(Duration::from_secs(1)).await;
+        sender.close().await.unwrap();
+    };
+
+    futures::join!(recvr_fut, sendr_fut);
+}

@@ -62,14 +62,14 @@ pub use validation::*;
 // SRTO_BINDTODEVICE - socket only
 // SRTO_REUSEADDR - socket specific
 // SRTO_STATE - socket specific
-// SRTO_RCVSYN - not even relevant for tokio
-// SRTO_RCVTIMEO - not even relevant for tokio
-// SRTO_SNDSYN - not even relevant for tokio
-// SRTO_SNDTIMEO - not even relevant for tokio
+// SRTO_RCVSYN - not even relevant for async runtimes
+// SRTO_RCVTIMEO - not even relevant for async runtimes
+// SRTO_SNDSYN - not even relevant for async runtimes
+// SRTO_SNDTIMEO - not even relevant for async runtimes
 // SRTO_KMSTATE - legacy, not supporting
 // SRTO_ISN - only good for development scenarios
-// SRTO_UDP_SNDBUF - not really relevant for tokio is it?
-// SRTO_UDP_RCVBUF - not really relevant for tokio, is it?
+// SRTO_UDP_SNDBUF - not really relevant for async runtimes is it?
+// SRTO_UDP_RCVBUF - not really relevant for async runtimes, is it?
 // SRTO_SENDER - always duplex
 // SRTO_MESSAGEAPI - only "live" is supported
 // SRTO_CONGESTION - only "live" is supported

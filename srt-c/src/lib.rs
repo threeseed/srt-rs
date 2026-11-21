@@ -10,4 +10,6 @@ mod epoll;
 #[cfg(not(target_os = "windows"))]
 mod errors;
 #[cfg(not(target_os = "windows"))]
+mod runtime;
+#[cfg(not(target_os = "windows"))]
 mod socket;
