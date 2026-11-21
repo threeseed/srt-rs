@@ -22,19 +22,15 @@ pretty_env_logger = { version = "0.5", default-features = false }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 console-subscriber = { version = "0.1", optional = true }
 
-[dependencies.tokio]
-version = "1"
-features = ["net", "time",  "fs", "test-util", "macros", "io-util", "io-std", "sync", "rt-multi-thread", "process"]
-
-[dependencies.tokio-util]
-version = "0.7"
-features = ["full"]
-
+[dependencies.compio]
+version = "0.19.2"
+default-features = false
+features = ["macros", "time", "net", "fs", "io", "runtime", "io-uring", "bytes"]
 
 [dev-dependencies]
 pretty_assertions = "1.3.0"
 rand = "0.8"
-tokio-stream = "0.1"
+compio = { version = "0.19.2", default-features = false, features = ["process"] }
 
 [features]
 default = []
